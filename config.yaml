@@ -1,0 +1,43 @@
+# Configuration for Fraud Detection Pipeline
+
+# Data paths
+data:
+  raw_path: "data/raw/financial_fraud_detection_dataset.csv"
+  processed_path: "data/processed/transactions.parquet"
+  test_path: "data/processed/test_data.parquet"  # Will be created during data processing
+
+# Model configurations
+models:
+  output_dir: "results/models"
+  
+  # Classification model parameters
+  classification:
+    hidden_layers: [128, 64, 32]
+    dropout_rate: 0.4
+    batch_size: 256
+    epochs: 20
+  
+  # Autoencoder model parameters
+  autoencoder:
+    hidden_layers: [64, 32]
+    encoding_dim: 16
+    batch_size: 256
+    epochs: 30
+
+# Evaluation configurations
+evaluation:
+  output_dir: "results"
+  threshold: null  # If null, will be determined automatically
+  percentile: 95   # For autoencoder threshold determination
+
+# MLflow configurations
+mlflow:
+  experiment_name: "Fraud_Detection_Experiment"
+  tracking_uri: "http://localhost:5000"
+  
+# Spark configurations
+spark:
+  app_name: "FraudDetectionPipeline"
+  driver_memory: "4g"
+  executor_memory: "4g"
+  max_result_size: "2g"

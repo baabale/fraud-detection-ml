@@ -1,0 +1,36 @@
+# MLflow Configuration for Fraud Detection Project
+
+experiment:
+  name: "Fraud_Detection_Experiment"
+  
+# Tracking server configuration
+tracking:
+  uri: "http://localhost:5000"  # MLflow tracking server URI (local)
+  
+# Artifact store configuration
+artifact_store:
+  path: "./mlruns"  # Local path for storing artifacts
+  
+# Model registry configuration
+model_registry:
+  name: "fraud-detection-models"
+
+# Run configurations
+run:
+  tags:
+    project: "fraud-detection"
+    framework: "tensorflow"
+    
+# Default parameters for classification model
+classification_params:
+  hidden_layers: [128, 64, 32]
+  dropout_rate: 0.4
+  batch_size: 256
+  epochs: 20
+  
+# Default parameters for autoencoder model
+autoencoder_params:
+  hidden_layers: [64, 32]
+  encoding_dim: 16
+  batch_size: 256
+  epochs: 30
