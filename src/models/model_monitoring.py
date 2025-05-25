@@ -3,6 +3,7 @@ Script for monitoring model performance and detecting data drift.
 This helps ensure the fraud detection models remain effective over time.
 """
 import os
+import sys
 import argparse
 import json
 import numpy as np
@@ -14,6 +15,14 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 import tensorflow as tf
 import joblib
 from scipy.stats import ks_2samp
+
+# Add the project root to the path to ensure imports work from any directory
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Import the configuration manager
+from src.utils.config_manager import config
 
 def load_reference_data(reference_data_path):
     """
@@ -373,27 +382,33 @@ def main():
     Main function to run model monitoring.
     """
     parser = argparse.ArgumentParser(description='Monitor fraud detection model performance')
-    parser.add_argument('--reference-data', type=str, required=True,
+    parser.add_argument('--reference-data', type=str,
                         help='Path to reference data used for training')
-    parser.add_argument('--production-data', type=str, required=True,
+    parser.add_argument('--production-data', type=str,
                         help='Path to production data for monitoring')
-    parser.add_argument('--model-dir', type=str, default='../../results/deployment',
+    parser.add_argument('--model-dir', type=str,
                         help='Directory containing model artifacts')
-    parser.add_argument('--output-dir', type=str, default='../../results/monitoring',
+    parser.add_argument('--output-dir', type=str,
                         help='Directory to save monitoring results')
     parser.add_argument('--drift-threshold', type=float, default=0.05,
                         help='P-value threshold for drift detection')
     args = parser.parse_args()
     
+    # Use configuration values if arguments are not provided
+    reference_data_path = args.reference_data or config.get_data_path('processed_path')
+    production_data_path = args.production_data or config.get_data_path('test_path')
+    model_dir = args.model_dir or config.get_model_path()
+    output_dir = args.output_dir or config.get_absolute_path(config.get('evaluation.output_dir', 'results/monitoring'))
+    
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     
     # Load data
-    reference_df = load_reference_data(args.reference_data)
-    production_df = load_production_data(args.production_data)
+    reference_df = load_reference_data(reference_data_path)
+    production_df = load_production_data(production_data_path)
     
     # Load model artifacts
-    model, scaler, feature_names = load_model_artifacts(args.model_dir)
+    model, scaler, feature_names = load_model_artifacts(model_dir)
     
     # Detect data drift
     drift_results = detect_data_drift(
@@ -409,7 +424,7 @@ def main():
             reference_df,
             production_df,
             drift_results['drifted_features'],
-            os.path.join(args.output_dir, 'drift_visualizations')
+            os.path.join(output_dir, 'drift_visualizations')
         )
     
     # Monitor model performance
@@ -419,14 +434,14 @@ def main():
         reference_df,
         production_df,
         feature_names,
-        args.output_dir
+        output_dir
     )
     
     # Generate monitoring report
     generate_monitoring_report(
         performance_results,
         drift_results,
-        args.output_dir
+        output_dir
     )
     
     print("Model monitoring completed successfully!")

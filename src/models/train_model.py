@@ -2,35 +2,49 @@
 Training script for fraud detection models with MLflow tracking.
 """
 import os
+import sys
+import json
 import argparse
-import pandas as pd
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, precision_recall_curve
+import tensorflow as tf
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import Dense, Dropout, Input
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import mlflow
 import mlflow.tensorflow
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
-import tensorflow as tf
+import joblib
+from datetime import datetime
 
-# Import local modules
-from fraud_model import (
-    create_classification_model, 
-    train_classification_model,
-    create_autoencoder_model,
-    train_autoencoder_model,
-    compute_anomaly_scores
-)
+# Add the project root to the path to ensure imports work from any directory
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-def load_processed_data(data_path):
+# Import the configuration manager
+from src.utils.config_manager import config
+
+def load_data(data_path=None):
     """
-    Load processed transaction data.
+    Load and prepare data for model training.
     
     Args:
-        data_path (str): Path to the processed data file
+        data_path (str, optional): Path to the processed data file. If None, uses the path from config.
         
     Returns:
-        DataFrame: Pandas DataFrame containing the processed data
+        tuple: X_train, X_val, X_test, y_train, y_val, y_test, feature_names, scaler
     """
+    # Use configuration if path not provided
+    if data_path is None:
+        data_path = config.get_data_path('processed_path')
+        
+    print(f"Loading data from {data_path}")
     # For Parquet files
     if data_path.endswith('.parquet'):
         df = pd.read_parquet(data_path)
@@ -41,26 +55,13 @@ def load_processed_data(data_path):
         raise ValueError(f"Unsupported file format: {data_path}")
     
     print(f"Loaded {len(df)} transactions from {data_path}")
-    return df
-
-def prepare_data(df, target_col='is_fraud', test_size=0.2, val_size=0.25):
-    """
-    Prepare data for model training by splitting and scaling.
     
-    Args:
-        df (DataFrame): Processed transaction data
-        target_col (str): Name of the target column
-        test_size (float): Proportion of data to use for testing
-        val_size (float): Proportion of training data to use for validation
-        
-    Returns:
-        tuple: X_train, X_val, X_test, y_train, y_val, y_test, scaler
-    """
     # Print column types for debugging
     print("Column dtypes:")
     print(df.dtypes)
     
     # Convert target to integer if it's boolean
+    target_col = 'is_fraud'
     if df[target_col].dtype == 'bool':
         df['fraud_label'] = df[target_col].astype(int)
         target_col = 'fraud_label'
@@ -106,23 +107,23 @@ def prepare_data(df, target_col='is_fraud', test_size=0.2, val_size=0.25):
     if len(unique_classes) > 1:
         # Use stratified split if multiple classes
         X_train_val, X_test, y_train_val, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=42, stratify=y
+            X, y, test_size=0.2, random_state=42, stratify=y
         )
         
         # Split training data into train and validation sets
         X_train, X_val, y_train, y_val = train_test_split(
-            X_train_val, y_train_val, test_size=val_size, random_state=42, stratify=y_train_val
+            X_train_val, y_train_val, test_size=0.25, random_state=42, stratify=y_train_val
         )
     else:
         # Use regular split if only one class (no stratification needed)
         print("Warning: Only one class present. Using regular train/test split without stratification.")
         X_train_val, X_test, y_train_val, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=42
+            X, y, test_size=0.2, random_state=42
         )
         
         # Split training data into train and validation sets
         X_train, X_val, y_train, y_val = train_test_split(
-            X_train_val, y_train_val, test_size=val_size, random_state=42
+            X_train_val, y_train_val, test_size=0.25, random_state=42
         )
     
     # Scale the features
@@ -133,7 +134,50 @@ def prepare_data(df, target_col='is_fraud', test_size=0.2, val_size=0.25):
     
     print(f"Data split: train={X_train.shape}, val={X_val.shape}, test={X_test.shape}")
     
-    return X_train, X_val, X_test, y_train, y_val, y_test, scaler
+    return X_train, X_val, X_test, y_train, y_val, y_test, numeric_cols, scaler
+
+def save_model_artifacts(model, model_type, scaler, feature_names, params, results, model_dir=None):
+    """
+    Save model and associated artifacts.
+    
+    Args:
+        model: Trained model
+        model_type (str): Type of model ('classification' or 'autoencoder')
+        scaler: Fitted scaler
+        feature_names (list): List of feature names
+        params (dict): Model parameters
+        results (dict): Training results
+        model_dir (str, optional): Directory to save model artifacts. If None, uses the path from config.
+    """
+    # Use configuration if path not provided
+    if model_dir is None:
+        model_dir = config.get_model_path()
+        
+    os.makedirs(model_dir, exist_ok=True)
+    print(f"Saving model artifacts to {model_dir}")
+    
+    # Save model
+    model_path = os.path.join(model_dir, f"{params['run_name']}_model.h5")
+    model.save(model_path)
+    
+    # Save scaler
+    scaler_path = os.path.join(model_dir, f"{params['run_name']}_scaler.joblib")
+    joblib.dump(scaler, scaler_path)
+    
+    # Save feature names
+    feature_names_path = os.path.join(model_dir, f"{params['run_name']}_feature_names.json")
+    with open(feature_names_path, 'w') as f:
+        json.dump(feature_names, f)
+    
+    # Save model parameters
+    params_path = os.path.join(model_dir, f"{params['run_name']}_params.json")
+    with open(params_path, 'w') as f:
+        json.dump(params, f)
+    
+    # Save training results
+    results_path = os.path.join(model_dir, f"{params['run_name']}_results.json")
+    with open(results_path, 'w') as f:
+        json.dump(results, f)
 
 def evaluate_classification_model(model, X_test, y_test):
     """
@@ -189,6 +233,25 @@ def evaluate_classification_model(model, X_test, y_test):
     
     return metrics
 
+def compute_anomaly_scores(model, X):
+    """
+    Compute anomaly scores for autoencoder model.
+    
+    Args:
+        model: Trained autoencoder model
+        X: Input features
+        
+    Returns:
+        numpy.ndarray: Array of anomaly scores
+    """
+    # Get reconstructions
+    X_pred = model.predict(X)
+    
+    # Compute reconstruction error (MSE) for each sample
+    mse = np.mean(np.square(X - X_pred), axis=1)
+    
+    return mse
+
 def evaluate_autoencoder_model(model, X_test, y_test, threshold=None):
     """
     Evaluate an autoencoder model for anomaly detection.
@@ -230,6 +293,74 @@ def evaluate_autoencoder_model(model, X_test, y_test, threshold=None):
                 metrics[f'{label}_{metric}'] = value
     
     return metrics, anomaly_scores
+
+def train_classification_model(X_train, y_train, X_val, y_val, input_dim, batch_size=256, 
+                           epochs=20, learning_rate=0.001, dropout_rate=0.4, 
+                           hidden_layers=None, class_weight=None, model_path=None):
+    """
+    Train a classification model for fraud detection.
+    
+    Args:
+        X_train: Training features
+        y_train: Training labels
+        X_val: Validation features
+        y_val: Validation labels
+        input_dim: Input dimension
+        batch_size: Batch size for training
+        epochs: Number of epochs
+        learning_rate: Learning rate for optimizer
+        dropout_rate: Dropout rate for regularization
+        hidden_layers: List of hidden layer sizes
+        class_weight: Class weights for imbalanced data
+        model_path: Path to save the model
+        
+    Returns:
+        tuple: Trained model and training history
+    """
+    # Set default hidden layers if not provided
+    if hidden_layers is None:
+        hidden_layers = [64, 32]
+    
+    # Build model
+    model = Sequential()
+    
+    # Input layer
+    model.add(Dense(hidden_layers[0], activation='relu', input_dim=input_dim))
+    model.add(Dropout(dropout_rate))
+    
+    # Hidden layers
+    for units in hidden_layers[1:]:
+        model.add(Dense(units, activation='relu'))
+        model.add(Dropout(dropout_rate))
+    
+    # Output layer
+    model.add(Dense(1, activation='sigmoid'))
+    
+    # Compile model
+    optimizer = Adam(learning_rate=learning_rate)
+    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+    
+    # Callbacks
+    callbacks = [
+        EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+    ]
+    
+    # Add model checkpoint if path is provided
+    if model_path:
+        callbacks.append(ModelCheckpoint(model_path, save_best_only=True))
+    
+    # Train model
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        class_weight=class_weight,
+        callbacks=callbacks,
+        verbose=1
+    )
+    
+    return model, history
 
 def run_classification_experiment(X_train, X_val, X_test, y_train, y_val, y_test, 
                                  input_dim, params, model_dir):
@@ -318,7 +449,80 @@ def run_classification_experiment(X_train, X_val, X_test, y_train, y_val, y_test
         # Log model
         mlflow.tensorflow.log_model(model, "model")
         
-        return metrics
+        return model, metrics
+
+def train_autoencoder_model(X_train, X_val, input_dim, batch_size=256, epochs=20,
+                          learning_rate=0.001, hidden_layers=None, encoding_dim=16,
+                          model_path=None):
+    """
+    Train an autoencoder model for anomaly detection.
+    
+    Args:
+        X_train: Training features
+        X_val: Validation features
+        input_dim: Input dimension
+        batch_size: Batch size for training
+        epochs: Number of epochs
+        learning_rate: Learning rate for optimizer
+        hidden_layers: List of hidden layer sizes
+        encoding_dim: Dimension of the encoding layer
+        model_path: Path to save the model
+        
+    Returns:
+        tuple: Trained model and training history
+    """
+    # Set default hidden layers if not provided
+    if hidden_layers is None:
+        hidden_layers = [64, 32]
+    
+    # Build encoder
+    input_layer = Input(shape=(input_dim,))
+    encoded = Dense(hidden_layers[0], activation='relu')(input_layer)
+    
+    # Add encoding layers
+    for units in hidden_layers[1:]:
+        encoded = Dense(units, activation='relu')(encoded)
+    
+    # Bottleneck layer
+    bottleneck = Dense(encoding_dim, activation='relu')(encoded)
+    
+    # Build decoder (mirror of encoder)
+    decoded = Dense(hidden_layers[-1], activation='relu')(bottleneck)
+    
+    # Add decoding layers
+    for units in reversed(hidden_layers[:-1]):
+        decoded = Dense(units, activation='relu')(decoded)
+    
+    # Output layer
+    output_layer = Dense(input_dim, activation='linear')(decoded)
+    
+    # Create model
+    model = Model(inputs=input_layer, outputs=output_layer)
+    
+    # Compile model
+    optimizer = Adam(learning_rate=learning_rate)
+    model.compile(optimizer=optimizer, loss='mse')
+    
+    # Callbacks
+    callbacks = [
+        EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+    ]
+    
+    # Add model checkpoint if path is provided
+    if model_path:
+        callbacks.append(ModelCheckpoint(model_path, save_best_only=True))
+    
+    # Train model
+    history = model.fit(
+        X_train, X_train,  # Autoencoder trains to reconstruct input
+        validation_data=(X_val, X_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        callbacks=callbacks,
+        verbose=1
+    )
+    
+    return model, history
 
 def run_autoencoder_experiment(X_train, X_val, X_test, y_train, y_val, y_test, 
                               input_dim, params, model_dir):
@@ -411,75 +615,134 @@ def run_autoencoder_experiment(X_train, X_val, X_test, y_train, y_val, y_test,
         # Log model
         mlflow.tensorflow.log_model(model, "model")
         
-        return metrics
+        return model, metrics
 
 def main():
     """
-    Main function to run the training pipeline.
+    Main function to train fraud detection models.
     """
     parser = argparse.ArgumentParser(description='Train fraud detection models')
-    parser.add_argument('--data-path', type=str, default='../../data/processed/transactions.parquet',
-                        help='Path to processed data file')
+    parser.add_argument('--data-path', type=str,
+                        help='Path to processed data')
+    parser.add_argument('--model-dir', type=str,
+                        help='Directory to save model artifacts')
+    parser.add_argument('--run-name', type=str,
+                        help='Name for the training run')
     parser.add_argument('--model-type', type=str, choices=['classification', 'autoencoder', 'both'],
-                        default='both', help='Type of model to train')
-    parser.add_argument('--experiment-name', type=str, default='Fraud_Detection_Experiment',
+                        help='Type of model to train')
+    parser.add_argument('--batch-size', type=int,
+                        help='Batch size for training')
+    parser.add_argument('--epochs', type=int,
+                        help='Number of epochs for training')
+    parser.add_argument('--learning-rate', type=float,
+                        help='Learning rate for optimizer')
+    parser.add_argument('--dropout-rate', type=float,
+                        help='Dropout rate for regularization')
+    parser.add_argument('--use-mlflow', action='store_true',
+                        help='Whether to use MLflow for tracking')
+    parser.add_argument('--mlflow-tracking-uri', type=str,
+                        help='MLflow tracking server URI')
+    parser.add_argument('--experiment-name', type=str,
                         help='MLflow experiment name')
-    parser.add_argument('--model-dir', type=str, default='../../results/models',
-                        help='Directory to save trained models')
     args = parser.parse_args()
     
-    # Create model directory if it doesn't exist
-    os.makedirs(args.model_dir, exist_ok=True)
+    # Use configuration values if arguments are not provided
+    data_path = args.data_path or config.get_data_path('processed_path')
+    model_dir = args.model_dir or config.get_model_path()
+    run_name = args.run_name or f'fraud_detection_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+    model_type = args.model_type or config.get('models.model_type', 'both')
+    
+    # Get model parameters from config if not provided
+    classification_params = config.get_model_params('classification')
+    autoencoder_params = config.get_model_params('autoencoder')
+    
+    batch_size = args.batch_size or classification_params.get('batch_size', 256)
+    epochs = args.epochs or classification_params.get('epochs', 20)
+    learning_rate = args.learning_rate or config.get('models.learning_rate', 0.001)
+    dropout_rate = args.dropout_rate or classification_params.get('dropout_rate', 0.4)
+    
+    # MLflow settings
+    mlflow_config = config.get_mlflow_config()
+    use_mlflow = args.use_mlflow or config.get('mlflow.enabled', False)
+    mlflow_tracking_uri = args.mlflow_tracking_uri or mlflow_config.get('tracking_uri', 'http://localhost:5000')
+    experiment_name = args.experiment_name or mlflow_config.get('experiment_name', 'Fraud_Detection_Experiment')
     
     # Load and prepare data
-    df = load_processed_data(args.data_path)
-    X_train, X_val, X_test, y_train, y_val, y_test, scaler = prepare_data(df)
+    X_train, X_val, X_test, y_train, y_val, y_test, feature_names, scaler = load_data(data_path)
     input_dim = X_train.shape[1]
     
     # Run experiments
-    if args.model_type in ['classification', 'both']:
+    if model_type in ['classification', 'both']:
         # Classification model parameters
         classification_params = {
-            'experiment_name': args.experiment_name,
-            'run_name': 'classification_model',
-            'hidden_layers': [64, 32],  # Simplified for testing
-            'dropout_rate': 0.3,
-            'batch_size': 32,  # Smaller batch size for testing
-            'epochs': 3  # Reduced epochs for faster testing
+            'experiment_name': experiment_name,
+            'run_name': run_name,
+            'hidden_layers': classification_params.get('hidden_layers', [64, 32]),
+            'dropout_rate': dropout_rate,
+            'batch_size': batch_size,
+            'epochs': epochs,
+            'learning_rate': learning_rate,
+            'use_mlflow': use_mlflow,
+            'mlflow_tracking_uri': mlflow_tracking_uri
         }
         
         # Run classification experiment
         print("Training classification model...")
-        classification_metrics = run_classification_experiment(
+        classification_model, classification_metrics = run_classification_experiment(
             X_train, X_val, X_test, y_train, y_val, y_test,
-            input_dim, classification_params, args.model_dir
+            input_dim, classification_params, model_dir
         )
         print("Classification model results:")
         for metric, value in classification_metrics.items():
             if not isinstance(value, list):
                 print(f"  {metric}: {value}")
+        
+        # Save model artifacts
+        save_model_artifacts(
+            classification_model,
+            'classification',
+            scaler,
+            feature_names,
+            classification_params,
+            classification_metrics,
+            model_dir
+        )
     
-    if args.model_type in ['autoencoder', 'both']:
+    if model_type in ['autoencoder', 'both']:
         # Autoencoder model parameters
         autoencoder_params = {
-            'experiment_name': args.experiment_name,
-            'run_name': 'autoencoder_model',
-            'hidden_layers': [32, 16],  # Simplified for testing
-            'encoding_dim': 8,  # Smaller encoding dimension for testing
-            'batch_size': 32,  # Smaller batch size for testing
-            'epochs': 3  # Reduced epochs for faster testing
+            'experiment_name': experiment_name,
+            'run_name': run_name,
+            'hidden_layers': autoencoder_params.get('hidden_layers', [64, 32]),
+            'encoding_dim': autoencoder_params.get('encoding_dim', 16),
+            'batch_size': batch_size,
+            'epochs': epochs,
+            'learning_rate': learning_rate,
+            'use_mlflow': use_mlflow,
+            'mlflow_tracking_uri': mlflow_tracking_uri
         }
         
         # Run autoencoder experiment
         print("Training autoencoder model...")
-        autoencoder_metrics = run_autoencoder_experiment(
+        autoencoder_model, autoencoder_metrics = run_autoencoder_experiment(
             X_train, X_val, X_test, y_train, y_val, y_test,
-            input_dim, autoencoder_params, args.model_dir
+            input_dim, autoencoder_params, model_dir
         )
         print("Autoencoder model results:")
         for metric, value in autoencoder_metrics.items():
             if not isinstance(value, list):
                 print(f"  {metric}: {value}")
+                
+        # Save autoencoder model artifacts
+        save_model_artifacts(
+            autoencoder_model,
+            'autoencoder',
+            scaler,
+            feature_names,
+            autoencoder_params,
+            autoencoder_metrics,
+            model_dir
+        )
 
 if __name__ == "__main__":
     main()

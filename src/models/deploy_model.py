@@ -11,6 +11,14 @@ import pandas as pd
 from flask import Flask, request, jsonify
 from sklearn.preprocessing import StandardScaler
 
+# Add the project root to the path to ensure imports work from any directory
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Import the configuration manager
+from src.utils.config_manager import config
+
 # Conditionally import TensorFlow
 try:
     import tensorflow as tf
@@ -367,23 +375,30 @@ def main():
     Main function to run the model deployment server.
     """
     parser = argparse.ArgumentParser(description='Deploy fraud detection models as an API')
-    parser.add_argument('--model-dir', type=str, default='../../results/models',
+    parser.add_argument('--model-dir', type=str,
                         help='Directory containing the trained models')
     parser.add_argument('--model-type', type=str, choices=['classification', 'autoencoder', 'both'],
-                        default='both', help='Type of model to deploy')
-    parser.add_argument('--host', type=str, default='0.0.0.0',
+                        help='Type of model to deploy')
+    parser.add_argument('--host', type=str,
                         help='Host to run the server on')
-    parser.add_argument('--port', type=int, default=8080,
+    parser.add_argument('--port', type=int,
                         help='Port to run the server on')
     parser.add_argument('--debug', action='store_true',
                         help='Run in debug mode')
     args = parser.parse_args()
     
+    # Use configuration values if arguments are not provided
+    model_dir = args.model_dir or config.get_model_path()
+    model_type = args.model_type or config.get('models.model_type', 'both')
+    host = args.host or config.get('api.host', '0.0.0.0')
+    port = args.port or config.get('api.port', 8080)
+    debug = args.debug or config.get('api.debug', False)
+    
     # Load models
-    load_models(args.model_dir, args.model_type)
+    load_models(model_dir, model_type)
     
     # Run the server
-    app.run(host=args.host, port=args.port, debug=args.debug)
+    app.run(host=host, port=port, debug=debug)
 
 if __name__ == "__main__":
     main()

@@ -20,23 +20,33 @@ from datetime import datetime
 
 # Add the project root to the path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-sys.path.append(project_root)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-def create_spark_session(app_name="FraudDetectionStreaming"):
+# Import the configuration manager
+from src.utils.config_manager import config
+
+def create_spark_session(app_name=None):
     """
     Create and return a Spark session configured for streaming.
     
     Args:
-        app_name (str): Name of the Spark application
+        app_name (str, optional): Name of the Spark application. If None, uses the value from config.
         
     Returns:
         SparkSession: Configured Spark session
     """
+    # Get Spark configuration from config
+    spark_config = config.get_spark_config()
+    app_name = app_name or spark_config.get('app_name', 'FraudDetectionStreaming')
+    driver_memory = spark_config.get('driver_memory', '4g')
+    executor_memory = spark_config.get('executor_memory', '4g')
+    
     return (SparkSession.builder
             .appName(app_name)
             .config("spark.streaming.stopGracefullyOnShutdown", "true")
-            .config("spark.driver.memory", "4g")
-            .config("spark.executor.memory", "4g")
+            .config("spark.driver.memory", driver_memory)
+            .config("spark.executor.memory", executor_memory)
             .getOrCreate())
 
 def load_models(model_dir):
@@ -173,6 +183,12 @@ def process_batch(batch_df, epoch_id, classification_model, autoencoder_model,
     if batch_df.isEmpty():
         return batch_df
     
+    # Log batch information
+    print(f"-------------------------------------------")
+    print(f"Batch: {epoch_id}")
+    print(f"-------------------------------------------")
+    batch_df.show(truncate=False)
+    
     # Preprocess data
     preprocessed_df = preprocess_data(batch_df, feature_names, scaler)
     
@@ -216,10 +232,23 @@ def process_batch(batch_df, epoch_id, classification_model, autoencoder_model,
             if field not in result:
                 result[field] = transaction[field]
         
+        # Log fraud predictions for each transaction
+        fraud_status = "FRAUD DETECTED!" if result['is_fraud'] else "legitimate"
+        print(f"Transaction {result['transaction_id']}: {fraud_status}")
+        print(f"  - Classification probability: {result['fraud_probability']:.4f}")
+        print(f"  - Anomaly score: {result['anomaly_score']:.4f}")
+        
         results.append(result)
     
     # Convert results to DataFrame
     result_df = pd.DataFrame(results)
+    
+    # Print summary of fraud detections
+    fraud_count = sum(1 for r in results if r['is_fraud'])
+    if fraud_count > 0:
+        print(f"\n!!! ALERT: {fraud_count} fraudulent transactions detected in this batch !!!\n")
+    else:
+        print("\nNo fraudulent transactions detected in this batch\n")
     
     # Convert back to Spark DataFrame
     spark = SparkSession.builder.getOrCreate()
@@ -247,54 +276,62 @@ def main():
     Main function to run the streaming fraud detection pipeline.
     """
     parser = argparse.ArgumentParser(description='Run streaming fraud detection')
-    parser.add_argument('--model-dir', type=str, default='../../results/models',
+    parser.add_argument('--model-dir', type=str,
                         help='Directory containing the trained models')
     parser.add_argument('--input-format', type=str, choices=['kafka', 'socket', 'file'],
-                        default='socket', help='Input stream format')
-    parser.add_argument('--input-path', type=str, default='localhost:9999',
+                        help='Input stream format')
+    parser.add_argument('--input-path', type=str,
                         help='Input path/topic/socket (depends on format)')
     parser.add_argument('--output-format', type=str, choices=['console', 'kafka', 'file'],
-                        default='console', help='Output format')
-    parser.add_argument('--output-path', type=str, default=None,
+                        help='Output format')
+    parser.add_argument('--output-path', type=str,
                         help='Output path/topic (depends on format)')
-    parser.add_argument('--checkpoint-dir', type=str, default='../../checkpoints',
+    parser.add_argument('--checkpoint-dir', type=str,
                         help='Directory for streaming checkpoints')
     args = parser.parse_args()
+    
+    # Use configuration values if arguments are not provided
+    model_dir = args.model_dir or config.get_model_path()
+    input_format = args.input_format or config.get('streaming.input_format', 'socket')
+    input_path = args.input_path or config.get('streaming.input_path', 'localhost:9999')
+    output_format = args.output_format or config.get('streaming.output_format', 'console')
+    output_path = args.output_path or config.get('streaming.output_path')
+    checkpoint_dir = args.checkpoint_dir or config.get_absolute_path(config.get('streaming.checkpoint_dir', 'checkpoints'))
     
     # Create Spark session
     spark = create_spark_session()
     
     # Load models
-    classification_model, autoencoder_model, scaler, feature_names, autoencoder_threshold = load_models(args.model_dir)
+    classification_model, autoencoder_model, scaler, feature_names, autoencoder_threshold = load_models(model_dir)
     
     # Define schema
     schema = define_schema()
     
     # Create streaming DataFrame based on input format
-    if args.input_format == 'kafka':
+    if input_format == 'kafka':
         stream_df = (spark.readStream
                     .format("kafka")
-                    .option("kafka.bootstrap.servers", args.input_path)
+                    .option("kafka.bootstrap.servers", input_path)
                     .option("subscribe", "transactions")
                     .option("startingOffsets", "latest")
                     .load()
                     .selectExpr("CAST(value AS STRING) as json")
                     .select(from_json("json", schema).alias("data"))
                     .select("data.*"))
-    elif args.input_format == 'socket':
+    elif input_format == 'socket':
         stream_df = (spark.readStream
                     .format("socket")
-                    .option("host", args.input_path.split(':')[0])
-                    .option("port", args.input_path.split(':')[1])
+                    .option("host", input_path.split(':')[0])
+                    .option("port", input_path.split(':')[1])
                     .load()
                     .selectExpr("CAST(value AS STRING) as json")
                     .select(from_json("json", schema).alias("data"))
                     .select("data.*"))
-    elif args.input_format == 'file':
+    elif input_format == 'file':
         stream_df = (spark.readStream
                     .format("json")
                     .schema(schema)
-                    .option("path", args.input_path)
+                    .option("path", input_path)
                     .option("maxFilesPerTrigger", 1)
                     .load())
     
@@ -304,22 +341,23 @@ def main():
                 batch_df, epoch_id, classification_model, autoencoder_model, 
                 scaler, feature_names, autoencoder_threshold
             ))
-            .outputMode("append"))
+            .outputMode("append")
+            .trigger(processingTime="1 second"))
     
     # Configure output
-    if args.output_format == 'console':
+    if output_format == 'console':
         query = (query.format("console")
                 .option("truncate", False))
-    elif args.output_format == 'kafka':
+    elif output_format == 'kafka':
         query = (query.format("kafka")
-                .option("kafka.bootstrap.servers", args.output_path)
+                .option("kafka.bootstrap.servers", output_path)
                 .option("topic", "fraud_predictions"))
-    elif args.output_format == 'file':
-        if args.output_path is None:
-            args.output_path = "../../results/streaming_output"
+    elif output_format == 'file':
+        if output_path is None:
+            output_path = config.get_absolute_path("results/streaming_output")
         query = (query.format("json")
-                .option("path", args.output_path)
-                .option("checkpointLocation", args.checkpoint_dir))
+                .option("path", output_path)
+                .option("checkpointLocation", checkpoint_dir))
     
     # Start the streaming query
     streaming_query = query.start()
