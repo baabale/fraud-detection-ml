@@ -216,7 +216,7 @@ def deploy_model(config):
     run_command(command)
     
     # Then, start the API server
-    command = f"python src/models/deploy_model.py --model-dir results/deployment --host 0.0.0.0 --port 5000"
+    command = f"python src/models/deploy_model.py --model-dir results/deployment --host 0.0.0.0 --port 8080"
     return run_command(command)
 
 def run_streaming(config):

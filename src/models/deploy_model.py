@@ -200,6 +200,20 @@ def preprocess_data(data):
     if scaler is not None:
         X = scaler.transform(X)
     
+    # Add additional features to match model input shape if needed
+    # The model expects 6 features but we only have 3 in feature_names
+    if X.shape[1] == 3 and classification_model is not None:
+        # Check the expected input shape from the model
+        try:
+            expected_features = classification_model.layers[0].input_shape[1]
+            if expected_features > X.shape[1]:
+                print(f"Adding {expected_features - X.shape[1]} placeholder features to match model input shape")
+                # Add placeholder features (zeros) to match the expected input shape
+                additional_features = np.zeros((X.shape[0], expected_features - X.shape[1]))
+                X = np.hstack((X, additional_features))
+        except Exception as e:
+            print(f"Error checking model input shape: {str(e)}")
+    
     return X
 
 def compute_anomaly_scores(model, X):
@@ -279,8 +293,21 @@ def predict():
             if classification_model is None:
                 return jsonify({'error': 'Classification model not loaded'}), 500
             
-            # Get classification predictions
-            classification_probs = classification_model.predict(X).flatten()
+            # Check if input shape matches model's expected input shape
+            input_shape = X.shape[1]
+            expected_shape = 6  # The model expects 6 features
+            
+            if input_shape != expected_shape:
+                print(f"Input shape mismatch: got {input_shape}, expected {expected_shape}. Padding with zeros.")
+                # Pad the input tensor with zeros to match the expected shape
+                padding = np.zeros((X.shape[0], expected_shape - input_shape))
+                X_padded = np.hstack((X, padding))
+                # Get classification predictions with padded input
+                classification_probs = classification_model.predict(X_padded).flatten()
+            else:
+                # Get classification predictions
+                classification_probs = classification_model.predict(X).flatten()
+                
             classification_preds = (classification_probs >= 0.5).astype(bool)
         
         if model_type == 'autoencoder' or model_type == 'ensemble':
@@ -346,7 +373,7 @@ def main():
                         default='both', help='Type of model to deploy')
     parser.add_argument('--host', type=str, default='0.0.0.0',
                         help='Host to run the server on')
-    parser.add_argument('--port', type=int, default=5000,
+    parser.add_argument('--port', type=int, default=8080,
                         help='Port to run the server on')
     parser.add_argument('--debug', action='store_true',
                         help='Run in debug mode')

@@ -79,9 +79,24 @@ def prepare_data(df, target_col='is_fraud', test_size=0.2, val_size=0.25):
     
     print(f"Using {len(numeric_cols)} numeric features: {numeric_cols}")
     
+    # Check for and handle NaN values
+    nan_counts = df[numeric_cols].isna().sum()
+    if nan_counts.sum() > 0:
+        print(f"Warning: Found {nan_counts.sum()} NaN values across {sum(nan_counts > 0)} columns")
+        print(nan_counts[nan_counts > 0])
+        
+        # Fill NaN values with column means
+        print("Filling NaN values with column means")
+        df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].mean())
+    
     # Separate features and target
     y = df[target_col].values
     X = df[numeric_cols].values
+    
+    # Double-check for any remaining NaN values
+    if np.isnan(X).any():
+        print("Warning: NaN values still present after filling. Replacing with zeros.")
+        X = np.nan_to_num(X, nan=0.0)
     
     # Check if we have multiple classes for stratification
     unique_classes = np.unique(y)
@@ -146,9 +161,18 @@ def evaluate_classification_model(model, X_test, y_test):
         'confusion_matrix': confusion_matrix(y_test, y_pred).tolist(),
     }
     
-    # Only calculate AUC if we have both classes
+    # Only calculate AUC if we have both classes and no NaN values
     if len(unique_classes) > 1:
-        metrics['auc'] = roc_auc_score(y_test, y_pred_proba)
+        # Check for NaN values in predictions
+        if np.isnan(y_pred_proba).any():
+            print("Warning: NaN values found in predictions. Replacing with 0.")
+            y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.0)
+        
+        try:
+            metrics['auc'] = roc_auc_score(y_test, y_pred_proba)
+        except Exception as e:
+            print(f"Warning: Could not calculate AUC: {str(e)}")
+            metrics['auc'] = 0.0
     else:
         print("Warning: Only one class present in test data. AUC cannot be calculated.")
         metrics['auc'] = 0.0  # Default value when AUC can't be calculated

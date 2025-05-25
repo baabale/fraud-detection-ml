@@ -267,18 +267,28 @@ def main():
     """
     Main function to save model artifacts.
     """
+    # Get the absolute path to the project root directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(script_dir, '../..'))
+    
+    # Define default paths using absolute paths
+    default_classification_model = os.path.join(project_root, 'results/models/classification_model_model.h5')
+    default_autoencoder_model = os.path.join(project_root, 'results/models/autoencoder_model_model.h5')
+    default_data_path = os.path.join(project_root, 'data/processed/transactions.parquet')
+    default_output_dir = os.path.join(project_root, 'results/deployment')
+    
     parser = argparse.ArgumentParser(description='Save model artifacts for deployment')
     parser.add_argument('--classification-model', type=str,
-                        default='../../results/models/classification_model.h5',
+                        default=default_classification_model,
                         help='Path to the classification model')
     parser.add_argument('--autoencoder-model', type=str,
-                        default='../../results/models/autoencoder_model.h5',
+                        default=default_autoencoder_model,
                         help='Path to the autoencoder model')
     parser.add_argument('--data-path', type=str,
-                        default='../../data/processed/transactions.parquet',
+                        default=default_data_path,
                         help='Path to the processed data')
     parser.add_argument('--output-dir', type=str,
-                        default='../../results/deployment',
+                        default=default_output_dir,
                         help='Directory to save artifacts')
     parser.add_argument('--threshold-percentile', type=int, default=95,
                         help='Percentile for autoencoder threshold')
@@ -289,6 +299,15 @@ def main():
     
     # Save classification model artifacts
     if os.path.exists(args.classification_model):
+        # Create a copy with the standard name expected by the deployment script
+        classification_dest = os.path.join(args.output_dir, 'classification_model.h5')
+        try:
+            import shutil
+            shutil.copy2(args.classification_model, classification_dest)
+            print(f"Copied classification model to {classification_dest}")
+        except Exception as e:
+            print(f"Error copying classification model: {str(e)}")
+            
         save_model_artifacts(
             args.classification_model,
             args.data_path,
@@ -300,6 +319,15 @@ def main():
     
     # Save autoencoder model artifacts
     if os.path.exists(args.autoencoder_model):
+        # Create a copy with the standard name expected by the deployment script
+        autoencoder_dest = os.path.join(args.output_dir, 'autoencoder_model.h5')
+        try:
+            import shutil
+            shutil.copy2(args.autoencoder_model, autoencoder_dest)
+            print(f"Copied autoencoder model to {autoencoder_dest}")
+        except Exception as e:
+            print(f"Error copying autoencoder model: {str(e)}")
+            
         save_model_artifacts(
             args.autoencoder_model,
             args.data_path,

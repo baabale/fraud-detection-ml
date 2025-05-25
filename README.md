@@ -77,6 +77,7 @@ The project uses the Kaggle Financial Transactions Dataset for Fraud Detection, 
 
 /docs            # Project documentation
   PROJECT.md
+  api_documentation.md  # API usage documentation
 
 main.py          # Interactive command interface
 config.yaml      # Configuration parameters
@@ -155,7 +156,23 @@ python src/models/evaluate_model.py
 
 #### Model Deployment
 ```bash
-python src/models/deploy_model.py
+python src/models/deploy_model.py --model-dir results/deployment --host 0.0.0.0 --port 8080
+```
+
+#### API Usage
+Once deployed, the fraud detection API can be accessed at `http://localhost:8080`. The API provides the following endpoints:
+
+- `GET /health` - Check API and model status
+- `POST /predict` - Submit transactions for fraud detection
+
+For detailed API documentation, see [API Documentation](docs/api_documentation.md).
+
+Example API request using curl:
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"transactions": [{"amount": 1000.0, "hour": 12, "day": 3, "feature4": 0.5, "feature5": 0.2, "feature6": 0.3}], "model_type": "classification"}' \
+  http://localhost:8080/predict
 ```
 
 #### Streaming Fraud Detection
