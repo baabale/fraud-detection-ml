@@ -88,13 +88,13 @@ mlflow_config.yaml # MLflow settings
 
 ### Prerequisites
 
-- Python 3.8+
-- Apache Spark 3.x
+- Python 3.10+
+- Apache Spark 3.3+
 - TensorFlow 2.10+
 - MLflow 2.0+
-- Jupyter Notebook/Lab
+- Docker and Docker Compose (for production deployment)
 
-### Installation
+### Development Environment Setup
 
 1. Clone this repository:
    ```bash
@@ -104,8 +104,8 @@ mlflow_config.yaml # MLflow settings
 
 2. Create a virtual environment:
    ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   python -m venv venv_fraud
+   source venv_fraud/bin/activate  # On Windows: venv_fraud\Scripts\activate
    ```
 
 3. Install required packages:
@@ -115,38 +115,61 @@ mlflow_config.yaml # MLflow settings
 
 4. Download the dataset from Kaggle and place it in the `/data/raw` directory.
 
+### Production Environment Setup
+
+1. Start the MLflow tracking server:
+   ```bash
+   mlflow server --host 0.0.0.0 --port 5000
+   ```
+
+2. Run the pipeline with production configuration:
+   ```bash
+   export CONFIG_PATH=config.production.yaml
+   python src/pipeline.py
+   ```
+
+3. Alternatively, use Docker for a containerized environment:
+   ```bash
+   docker-compose up mlflow
+   docker-compose up fraud-detection
+   ```
+
 ## 🚀 Usage
 
-The project includes an interactive interface for all operations. Simply run:
+### Running the Pipeline
+
+To run the complete fraud detection pipeline:
 
 ```bash
-python main.py
+python src/pipeline.py
 ```
 
-This will display a menu with the following options:
+You can specify which steps to run and which model types to use:
 
-1. **Run the complete pipeline**
-2. **Process the data**
-3. **Train models**
-4. **Evaluate models**
-5. **Deploy models as API**
-6. **Run streaming fraud detection**
-7. **Generate synthetic test data**
-8. **Monitor model performance**
-9. **Launch Jupyter notebooks**
+```bash
+python src/pipeline.py --steps process train evaluate --model-type both
+```
 
-### Manual Operation
+Available options:
+- `--steps`: Choose from `process`, `train`, `evaluate`, or `all`
+- `--model-type`: Choose from `classification`, `autoencoder`, or `both`
+- `--config`: Path to configuration file (default: `config.yaml`)
 
-You can also run individual components directly:
+### Individual Components
 
 #### Data Preprocessing
 ```bash
-python src/spark_jobs/load_data.py
+python src/spark_jobs/load_data.py --input data/raw/sample_dataset.csv --output data/processed/transactions.parquet
 ```
 
 #### Model Training
 ```bash
-python src/models/train_model.py
+python src/models/train_model.py --data-path data/processed/transactions.parquet --model-type both --experiment-name Fraud_Detection --model-dir results/models
+```
+
+#### Model Evaluation
+```bash
+python src/models/evaluate_model.py --model-path results/models/classification_model_model.h5 --test-data data/processed/transactions.parquet --model-type classification --output-dir results
 ```
 
 #### Model Evaluation
@@ -197,6 +220,93 @@ The system includes comprehensive monitoring capabilities:
 - Data drift detection between training and production data
 - Model performance tracking over time
 - Automated reporting with recommendations for model updates
+
+## 🚢 Production Deployment
+
+This project is set up for production deployment using Docker and CI/CD pipelines. Follow these steps to deploy the system in a production environment:
+
+### Docker Deployment
+
+1. Build the Docker image:
+   ```bash
+   docker build -t fraud-detection .
+   ```
+
+2. Run the container in different modes:
+   
+   **Training Pipeline:**
+   ```bash
+   docker run -v $(pwd)/data:/app/data -v $(pwd)/results:/app/results fraud-detection train
+   ```
+   
+   **API Service:**
+   ```bash
+   docker run -p 8000:8000 -v $(pwd)/results:/app/results fraud-detection api
+   ```
+   
+   **Streaming Service:**
+   ```bash
+   docker run -v $(pwd)/data:/app/data -v $(pwd)/results:/app/results fraud-detection stream
+   ```
+   
+   **Monitoring Service:**
+   ```bash
+   docker run -v $(pwd)/results:/app/results fraud-detection monitor
+   ```
+
+3. Using Docker Compose (recommended for production):
+   ```bash
+   docker-compose up -d
+   ```
+   This will start all services defined in the `docker-compose.yml` file.
+
+### CI/CD Pipeline
+
+The project includes a GitHub Actions workflow for continuous integration and deployment:
+
+1. **Automated Testing**: Runs unit and integration tests on every push and pull request
+2. **Docker Build**: Builds and pushes the Docker image to GitHub Container Registry
+3. **Deployment**: Automatically deploys to production when changes are merged to the main branch
+
+To set up the CI/CD pipeline:
+
+1. Configure the necessary secrets in your GitHub repository:
+   - `DEPLOY_HOST`: Hostname of your deployment server
+   - `DEPLOY_USERNAME`: Username for SSH access
+   - `DEPLOY_KEY`: SSH private key for deployment
+
+2. Uncomment the deployment job in `.github/workflows/ci-cd.yml` and update the deployment path.
+
+### Production Configuration
+
+The system uses separate configuration files for development and production:
+
+- `config.yaml`: Development configuration
+- `config.production.yaml`: Production configuration
+
+To use the production configuration, set the `CONFIG_PATH` environment variable:
+
+```bash
+export CONFIG_PATH=config.production.yaml
+```
+
+The Docker containers automatically use the production configuration.
+
+### Monitoring and Logging
+
+In production, the system provides:
+
+1. **Prometheus Metrics**: Available at the `/metrics` endpoint
+2. **Centralized Logging**: All logs are stored in `/app/logs/fraud_detection.log`
+3. **Model Drift Detection**: Automatically monitors for data and model drift
+
+### Scaling Considerations
+
+For high-throughput environments:
+
+1. **Horizontal Scaling**: Deploy multiple API containers behind a load balancer
+2. **Spark Cluster**: Configure the system to connect to an external Spark cluster
+3. **Distributed Training**: Utilize distributed TensorFlow for model training on large datasets
 
 ## 📄 License
 
