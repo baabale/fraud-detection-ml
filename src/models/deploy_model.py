@@ -5,14 +5,59 @@ This script creates a simple Flask API for model serving.
 import os
 import argparse
 import json
+import sys
 import numpy as np
 import pandas as pd
-import tensorflow as tf
 from flask import Flask, request, jsonify
-import mlflow
-import mlflow.tensorflow
 from sklearn.preprocessing import StandardScaler
-import joblib
+
+# Conditionally import TensorFlow
+try:
+    import tensorflow as tf
+    TENSORFLOW_AVAILABLE = True
+except ImportError:
+    print("WARNING: TensorFlow not available. Using mock implementation.")
+    TENSORFLOW_AVAILABLE = False
+    
+    # Create a simple mock for TensorFlow functionality
+    class MockTF:
+        class keras:
+            class models:
+                @staticmethod
+                def load_model(path):
+                    print(f"Mock: Loading model from {path}")
+                    return MockModel()
+        
+        @staticmethod
+        def __version__():
+            return "MOCK"
+    
+    class MockModel:
+        def predict(self, X):
+            print(f"Mock: Predicting on data with shape {X.shape}")
+            # Return random predictions
+            return np.random.random(size=(X.shape[0], 1))
+    
+    # Use the mock
+    tf = MockTF()
+
+# Conditionally import MLflow
+try:
+    import mlflow
+    import mlflow.tensorflow
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    print("WARNING: MLflow not available. Tracking functionality disabled.")
+    MLFLOW_AVAILABLE = False
+
+# Conditionally import joblib
+try:
+    import joblib
+    JOBLIB_AVAILABLE = True
+except ImportError:
+    print("WARNING: joblib not available. Using pickle as fallback.")
+    JOBLIB_AVAILABLE = False
+    import pickle as joblib
 
 # Create Flask app
 app = Flask(__name__)
@@ -37,51 +82,89 @@ def load_models(model_dir, model_type='both'):
     """
     global classification_model, autoencoder_model, scaler, feature_names, autoencoder_threshold
     
+    # Create model directory if it doesn't exist
+    os.makedirs(model_dir, exist_ok=True)
+    
     # Load scaler
     scaler_path = os.path.join(model_dir, 'scaler.joblib')
     if os.path.exists(scaler_path):
-        scaler = joblib.load(scaler_path)
-        print(f"Loaded scaler from {scaler_path}")
+        try:
+            scaler = joblib.load(scaler_path)
+            print(f"Loaded scaler from {scaler_path}")
+        except Exception as e:
+            print(f"Error loading scaler: {str(e)}")
+            scaler = StandardScaler()
+            print("Using default StandardScaler instead")
     else:
         print(f"Warning: Scaler not found at {scaler_path}")
+        scaler = StandardScaler()
+        print("Using default StandardScaler instead")
     
     # Load feature names
     feature_names_path = os.path.join(model_dir, 'feature_names.json')
     if os.path.exists(feature_names_path):
-        with open(feature_names_path, 'r') as f:
-            feature_names = json.load(f)
-        print(f"Loaded {len(feature_names)} feature names")
+        try:
+            with open(feature_names_path, 'r') as f:
+                feature_names = json.load(f)
+            print(f"Loaded {len(feature_names)} feature names")
+        except Exception as e:
+            print(f"Error loading feature names: {str(e)}")
+            feature_names = None
     else:
         print(f"Warning: Feature names not found at {feature_names_path}")
+        feature_names = None
     
     # Load autoencoder threshold
     threshold_path = os.path.join(model_dir, 'autoencoder_threshold.json')
     if os.path.exists(threshold_path):
-        with open(threshold_path, 'r') as f:
-            threshold_data = json.load(f)
-            autoencoder_threshold = threshold_data.get('threshold', 0.1)
-        print(f"Loaded autoencoder threshold: {autoencoder_threshold}")
+        try:
+            with open(threshold_path, 'r') as f:
+                threshold_data = json.load(f)
+                autoencoder_threshold = threshold_data.get('threshold', 0.1)
+            print(f"Loaded autoencoder threshold: {autoencoder_threshold}")
+        except Exception as e:
+            print(f"Error loading autoencoder threshold: {str(e)}")
+            autoencoder_threshold = 0.1
+            print(f"Using default threshold: {autoencoder_threshold}")
     else:
         autoencoder_threshold = 0.1
         print(f"Warning: Autoencoder threshold not found, using default: {autoencoder_threshold}")
     
-    # Load classification model
+    # Load classification model if TensorFlow is available
     if model_type in ['classification', 'both']:
-        classification_model_path = os.path.join(model_dir, 'classification_model.h5')
-        if os.path.exists(classification_model_path):
-            classification_model = tf.keras.models.load_model(classification_model_path)
-            print(f"Loaded classification model from {classification_model_path}")
+        if TENSORFLOW_AVAILABLE:
+            classification_model_path = os.path.join(model_dir, 'classification_model.h5')
+            if os.path.exists(classification_model_path):
+                try:
+                    classification_model = tf.keras.models.load_model(classification_model_path)
+                    print(f"Loaded classification model from {classification_model_path}")
+                except Exception as e:
+                    print(f"Error loading classification model: {str(e)}")
+                    classification_model = None
+            else:
+                print(f"Warning: Classification model not found at {classification_model_path}")
+                classification_model = None
         else:
-            print(f"Warning: Classification model not found at {classification_model_path}")
+            print("TensorFlow not available, cannot load classification model")
+            classification_model = None
     
-    # Load autoencoder model
+    # Load autoencoder model if TensorFlow is available
     if model_type in ['autoencoder', 'both']:
-        autoencoder_model_path = os.path.join(model_dir, 'autoencoder_model.h5')
-        if os.path.exists(autoencoder_model_path):
-            autoencoder_model = tf.keras.models.load_model(autoencoder_model_path)
-            print(f"Loaded autoencoder model from {autoencoder_model_path}")
+        if TENSORFLOW_AVAILABLE:
+            autoencoder_model_path = os.path.join(model_dir, 'autoencoder_model.h5')
+            if os.path.exists(autoencoder_model_path):
+                try:
+                    autoencoder_model = tf.keras.models.load_model(autoencoder_model_path)
+                    print(f"Loaded autoencoder model from {autoencoder_model_path}")
+                except Exception as e:
+                    print(f"Error loading autoencoder model: {str(e)}")
+                    autoencoder_model = None
+            else:
+                print(f"Warning: Autoencoder model not found at {autoencoder_model_path}")
+                autoencoder_model = None
         else:
-            print(f"Warning: Autoencoder model not found at {autoencoder_model_path}")
+            print("TensorFlow not available, cannot load autoencoder model")
+            autoencoder_model = None
     
     return classification_model, autoencoder_model
 

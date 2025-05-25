@@ -8,14 +8,33 @@ import argparse
 import subprocess
 import yaml
 import logging
+import sys
 from datetime import datetime
 
+# Check for required dependencies
+def check_dependencies():
+    missing_deps = []
+    optional_deps = {
+        'tensorflow': "Deep learning models will not be available",
+        'pyspark': "Distributed data processing will not be available",
+        'mlflow': "Experiment tracking will not be available"
+    }
+    
+    for dep, message in optional_deps.items():
+        try:
+            __import__(dep)
+        except ImportError:
+            missing_deps.append(f"{dep}: {message}")
+    
+    return missing_deps
+
 # Configure logging
+os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('fraud_detection.log'),
+        logging.FileHandler('logs/fraud_detection.log'),
         logging.StreamHandler()
     ]
 )
@@ -252,7 +271,21 @@ def main():
     """
     print("\n" + "="*60)
     print("   ANOMALY-BASED FRAUD DETECTION SYSTEM")
-    print("="*60)
+    print("="*60 + "\n")
+    
+    # Check for missing dependencies
+    missing_deps = check_dependencies()
+    if missing_deps:
+        print("\nWARNING: Some dependencies are missing. Certain features may be limited.")
+        for dep in missing_deps:
+            print(f"  - {dep}")
+        print("\nYou can install missing dependencies with: pip install <package_name>")
+        print("\nPress Enter to continue with limited functionality...")
+        try:
+            input()
+        except EOFError:
+            # Handle case where input() is not available (e.g., in non-interactive environments)
+            print("\nContinuing with limited functionality...")
     
     # Load configuration
     config_path = 'config.yaml'

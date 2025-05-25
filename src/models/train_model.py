@@ -56,19 +56,59 @@ def prepare_data(df, target_col='is_fraud', test_size=0.2, val_size=0.25):
     Returns:
         tuple: X_train, X_val, X_test, y_train, y_val, y_test, scaler
     """
+    # Print column types for debugging
+    print("Column dtypes:")
+    print(df.dtypes)
+    
+    # Convert target to integer if it's boolean
+    if df[target_col].dtype == 'bool':
+        df['fraud_label'] = df[target_col].astype(int)
+        target_col = 'fraud_label'
+        print(f"Converted boolean target to integer: {target_col}")
+    
+    # Select only numeric columns for features
+    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    
+    # Remove the target column from features if it's in numeric_cols
+    if target_col in numeric_cols:
+        numeric_cols.remove(target_col)
+    
+    # Also remove any ID columns or other non-feature columns
+    cols_to_exclude = ['transaction_id', 'sender_account', 'receiver_account', 'ip_address', 'device_hash']
+    numeric_cols = [col for col in numeric_cols if col not in cols_to_exclude]
+    
+    print(f"Using {len(numeric_cols)} numeric features: {numeric_cols}")
+    
     # Separate features and target
     y = df[target_col].values
-    X = df.drop(columns=[target_col]).values
+    X = df[numeric_cols].values
+    
+    # Check if we have multiple classes for stratification
+    unique_classes = np.unique(y)
+    print(f"Unique classes in dataset: {unique_classes}")
     
     # Split into train and test sets
-    X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=42, stratify=y
-    )
-    
-    # Split training data into train and validation sets
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_train_val, y_train_val, test_size=val_size, random_state=42, stratify=y_train_val
-    )
+    if len(unique_classes) > 1:
+        # Use stratified split if multiple classes
+        X_train_val, X_test, y_train_val, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=42, stratify=y
+        )
+        
+        # Split training data into train and validation sets
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train_val, y_train_val, test_size=val_size, random_state=42, stratify=y_train_val
+        )
+    else:
+        # Use regular split if only one class (no stratification needed)
+        print("Warning: Only one class present. Using regular train/test split without stratification.")
+        X_train_val, X_test, y_train_val, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=42
+        )
+        
+        # Split training data into train and validation sets
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train_val, y_train_val, test_size=val_size, random_state=42
+        )
     
     # Scale the features
     scaler = StandardScaler()
@@ -96,19 +136,32 @@ def evaluate_classification_model(model, X_test, y_test):
     y_pred_proba = model.predict(X_test)
     y_pred = (y_pred_proba > 0.5).astype(int).flatten()
     
+    # Check for class distribution in test data
+    unique_classes = np.unique(y_test)
+    print(f"Unique classes in test data: {unique_classes}")
+    
     # Calculate metrics
     metrics = {
         'accuracy': np.mean(y_pred == y_test),
-        'auc': roc_auc_score(y_test, y_pred_proba),
         'confusion_matrix': confusion_matrix(y_test, y_pred).tolist(),
     }
     
-    # Classification report
-    report = classification_report(y_test, y_pred, output_dict=True)
-    for label, scores in report.items():
-        if isinstance(scores, dict):
-            for metric, value in scores.items():
-                metrics[f'{label}_{metric}'] = value
+    # Only calculate AUC if we have both classes
+    if len(unique_classes) > 1:
+        metrics['auc'] = roc_auc_score(y_test, y_pred_proba)
+    else:
+        print("Warning: Only one class present in test data. AUC cannot be calculated.")
+        metrics['auc'] = 0.0  # Default value when AUC can't be calculated
+    
+    try:
+        # Classification report
+        report = classification_report(y_test, y_pred, output_dict=True)
+        for label, scores in report.items():
+            if isinstance(scores, dict):
+                for metric, value in scores.items():
+                    metrics[f'{label}_{metric}'] = value
+    except Exception as e:
+        print(f"Warning: Could not generate classification report: {str(e)}")
     
     return metrics
 
@@ -169,6 +222,10 @@ def run_classification_experiment(X_train, X_val, X_test, y_train, y_val, y_test
     Returns:
         dict: Evaluation metrics
     """
+    # Import visualization libraries here to avoid issues if running in headless mode
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
     # Set up MLflow experiment
     mlflow.set_experiment(params['experiment_name'])
     
@@ -185,7 +242,16 @@ def run_classification_experiment(X_train, X_val, X_test, y_train, y_val, y_test
         
         # Handle class imbalance
         class_counts = np.bincount(y_train.astype(int))
-        class_weight = {0: 1.0, 1: class_counts[0] / class_counts[1]}
+        print(f"Class distribution in training data: {class_counts}")
+        
+        # Check if we have both classes (fraud and non-fraud)
+        if len(class_counts) > 1 and class_counts[1] > 0:
+            class_weight = {0: 1.0, 1: class_counts[0] / class_counts[1]}
+        else:
+            # If only one class is present, use balanced weights
+            print("Warning: Only one class present in training data. Using balanced weights.")
+            class_weight = {0: 1.0}
+            
         mlflow.log_param('class_weight', str(class_weight))
         
         # Model path
@@ -245,6 +311,10 @@ def run_autoencoder_experiment(X_train, X_val, X_test, y_train, y_val, y_test,
     Returns:
         dict: Evaluation metrics
     """
+    # Import visualization libraries here to avoid issues if running in headless mode
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
     # Set up MLflow experiment
     mlflow.set_experiment(params['experiment_name'])
     
@@ -342,20 +412,16 @@ def main():
     X_train, X_val, X_test, y_train, y_val, y_test, scaler = prepare_data(df)
     input_dim = X_train.shape[1]
     
-    # Import visualization libraries here to avoid issues if running in headless mode
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    
     # Run experiments
     if args.model_type in ['classification', 'both']:
         # Classification model parameters
         classification_params = {
             'experiment_name': args.experiment_name,
             'run_name': 'classification_model',
-            'hidden_layers': [128, 64, 32],
-            'dropout_rate': 0.4,
-            'batch_size': 256,
-            'epochs': 20
+            'hidden_layers': [64, 32],  # Simplified for testing
+            'dropout_rate': 0.3,
+            'batch_size': 32,  # Smaller batch size for testing
+            'epochs': 3  # Reduced epochs for faster testing
         }
         
         # Run classification experiment
@@ -374,10 +440,10 @@ def main():
         autoencoder_params = {
             'experiment_name': args.experiment_name,
             'run_name': 'autoencoder_model',
-            'hidden_layers': [64, 32],
-            'encoding_dim': 16,
-            'batch_size': 256,
-            'epochs': 30
+            'hidden_layers': [32, 16],  # Simplified for testing
+            'encoding_dim': 8,  # Smaller encoding dimension for testing
+            'batch_size': 32,  # Smaller batch size for testing
+            'epochs': 3  # Reduced epochs for faster testing
         }
         
         # Run autoencoder experiment

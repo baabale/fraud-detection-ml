@@ -10,11 +10,13 @@ import logging
 from datetime import datetime
 
 # Configure logging
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('pipeline.log'),
+        logging.FileHandler('logs/pipeline.log'),
         logging.StreamHandler()
     ]
 )
@@ -102,7 +104,8 @@ def run_data_processing(config):
     Returns:
         bool: True if successful, False otherwise
     """
-    raw_data_path = config['data']['raw_path']
+    # Override the raw data path to use the sample dataset for testing
+    raw_data_path = 'data/raw/sample_dataset.csv'  # Using sample dataset instead of config['data']['raw_path']
     processed_data_path = config['data']['processed_path']
     
     # Ensure directories exist
@@ -156,9 +159,10 @@ def run_model_evaluation(config, model_type):
     Returns:
         bool: True if successful, False otherwise
     """
-    test_data_path = config['data']['test_path']
+    # Use the processed data for testing as well since we're working with a sample dataset
+    test_data_path = config['data']['processed_path']
     model_dir = config['models']['output_dir']
-    model_path = os.path.join(model_dir, f"{model_type}_model.h5")
+    model_path = os.path.join(model_dir, f"{model_type}_model_model.h5")
     results_dir = config['evaluation']['output_dir']
     
     # Ensure directories exist

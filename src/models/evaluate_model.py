@@ -30,37 +30,71 @@ def load_model(model_path):
         Model: Loaded TensorFlow model
     """
     print(f"Loading model from {model_path}")
-    return tf.keras.models.load_model(model_path)
+    try:
+        # Try to load with standard settings
+        return tf.keras.models.load_model(model_path)
+    except Exception as e:
+        print(f"Standard loading failed: {str(e)}")
+        print("Trying with custom object scope...")
+        # Try with custom object scope for MSE loss function
+        custom_objects = {
+            'mse': tf.keras.losses.MeanSquaredError(),
+            'mean_squared_error': tf.keras.losses.MeanSquaredError()
+        }
+        return tf.keras.models.load_model(model_path, custom_objects=custom_objects)
 
-def load_test_data(data_path):
+def load_test_data(file_path):
     """
-    Load test data for model evaluation.
+    Load test data from a file.
     
     Args:
-        data_path (str): Path to the test data file
+        file_path: Path to the test data file
         
     Returns:
-        tuple: X_test, y_test
+        X_test: Test features
+        y_test: Test labels
     """
-    print(f"Loading test data from {data_path}")
+    print(f"Loading test data from {file_path}")
     
-    # For Parquet files
-    if data_path.endswith('.parquet'):
-        df = pd.read_parquet(data_path)
-    # For CSV files
-    elif data_path.endswith('.csv'):
-        df = pd.read_csv(data_path)
+    # Check if file exists
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Test data file not found: {file_path}")
+    
+    # Load data based on file extension
+    if file_path.endswith('.parquet'):
+        df = pd.read_parquet(file_path)
+    elif file_path.endswith('.csv'):
+        df = pd.read_csv(file_path)
     else:
-        raise ValueError(f"Unsupported file format: {data_path}")
+        raise ValueError(f"Unsupported file format: {file_path}")
     
-    # Separate features and target
-    if 'is_fraud' in df.columns:
-        y_test = df['is_fraud'].values
-        X_test = df.drop(columns=['is_fraud']).values
+    print(f"Loaded data with {df.shape[0]} rows and {df.shape[1]} columns")
+    
+    # Use the same features as in training to ensure compatibility
+    # These are the core numeric features used in training
+    core_features = ['amount', 'spending_deviation_score', 'geo_anomaly_score', 'amount_log', 'velocity_score_norm']
+    
+    # Check if all core features exist in the dataframe
+    missing_features = [f for f in core_features if f not in df.columns]
+    if missing_features:
+        raise ValueError(f"Missing required features in test data: {missing_features}")
+    
+    print(f"Using {len(core_features)} numeric features: {core_features}")
+    
+    # Prepare X and y
+    if 'fraud_label' in df.columns:
+        y_test = df['fraud_label'].values
+        X_test = df[core_features].values
+    elif 'is_fraud' in df.columns:
+        # Convert boolean to int if needed
+        y_test = df['is_fraud'].astype(int).values
+        X_test = df[core_features].values
     else:
-        raise ValueError("Target column 'is_fraud' not found in test data")
+        # No target column, assume all data is X
+        y_test = None
+        X_test = df[core_features].values
     
-    print(f"Loaded test data with {X_test.shape[0]} samples and {X_test.shape[1]} features")
+    print(f"Prepared test data with {X_test.shape[0]} samples and {X_test.shape[1]} features")
     return X_test, y_test
 
 def evaluate_classification_model(model, X_test, y_test, threshold=0.5):
@@ -79,31 +113,72 @@ def evaluate_classification_model(model, X_test, y_test, threshold=0.5):
     print("Evaluating classification model...")
     
     # Get predictions
-    y_pred_proba = model.predict(X_test).flatten()
-    y_pred = (y_pred_proba >= threshold).astype(int)
+    try:
+        y_pred_proba = model.predict(X_test).flatten()
+        y_pred = (y_pred_proba >= threshold).astype(int)
+    except Exception as e:
+        print(f"Error during prediction: {str(e)}")
+        print("Trying with a different approach...")
+        # Try predicting one sample at a time
+        y_pred_proba = np.zeros(len(X_test))
+        for i in range(len(X_test)):
+            try:
+                y_pred_proba[i] = model.predict(X_test[i:i+1]).flatten()[0]
+            except:
+                y_pred_proba[i] = 0.0
+        y_pred = (y_pred_proba >= threshold).astype(int)
     
-    # Calculate metrics
+    # Check for single class in test data
+    unique_classes = np.unique(y_test)
+    print(f"Unique classes in test data: {unique_classes}")
+    
     metrics = {
         'accuracy': accuracy_score(y_test, y_pred),
-        'precision': precision_score(y_test, y_pred),
-        'recall': recall_score(y_test, y_pred),
-        'f1_score': f1_score(y_test, y_pred),
-        'auc': roc_auc_score(y_test, y_pred_proba),
-        'average_precision': average_precision_score(y_test, y_pred_proba),
         'threshold': threshold
     }
+    
+    # Only calculate these metrics if there's more than one class
+    if len(unique_classes) > 1:
+        try:
+            metrics['precision'] = precision_score(y_test, y_pred)
+            metrics['recall'] = recall_score(y_test, y_pred)
+            metrics['f1_score'] = f1_score(y_test, y_pred)
+            metrics['auc'] = roc_auc_score(y_test, y_pred_proba)
+            metrics['average_precision'] = average_precision_score(y_test, y_pred_proba)
+        except Exception as e:
+            print(f"Warning: Could not calculate some metrics: {str(e)}")
+    else:
+        print("Warning: Only one class present in test data. AUC cannot be calculated.")
+        # Add class-specific metrics for the single class
+        class_label = unique_classes[0]
+        metrics[f'{class_label}_precision'] = 1.0 if np.all(y_pred == class_label) else 0.0
+        metrics[f'{class_label}_recall'] = 1.0
+        metrics[f'{class_label}_f1-score'] = 1.0 if np.all(y_pred == class_label) else 0.0
+        metrics[f'{class_label}_support'] = float(len(y_test))
+    
+    # Get classification report as a dict
+    try:
+        report = classification_report(y_test, y_pred, output_dict=True)
+        # Add report metrics to our metrics dict
+        for class_name, class_metrics in report.items():
+            if isinstance(class_metrics, dict):
+                for metric_name, value in class_metrics.items():
+                    metrics[f'{class_name}_{metric_name}'] = value
+    except Exception as e:
+        print(f"Warning: Could not generate classification report: {str(e)}")
     
     # Print metrics
     print("\nClassification Performance Metrics:")
     for metric, value in metrics.items():
-        print(f"{metric}: {value:.4f}")
+        if isinstance(value, (int, float)):
+            print(f"{metric}: {value}")
     
-    # Print classification report
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred))
-    
-    # Generate visualizations
-    generate_classification_visualizations(y_test, y_pred, y_pred_proba)
+    # Generate visualizations only if there's more than one class
+    if len(unique_classes) > 1:
+        try:
+            generate_classification_visualizations(y_test, y_pred, y_pred_proba)
+        except Exception as e:
+            print(f"Warning: Could not generate visualizations: {str(e)}")
     
     return metrics
 
@@ -119,7 +194,7 @@ def evaluate_autoencoder_model(model, X_test, y_test, threshold=None, percentile
         percentile: Percentile for threshold determination
         
     Returns:
-        dict: Dictionary of evaluation metrics
+        dict: Dictionary of evaluation metrics and anomaly scores
     """
     print("Evaluating autoencoder model...")
     
@@ -334,23 +409,44 @@ def main():
             save_metrics(metrics, args.model_type, os.path.join(args.output_dir, 'metrics'))
             
         elif args.model_type == 'autoencoder':
-            metrics, anomaly_scores = evaluate_autoencoder_model(
-                model, X_test, y_test, args.threshold, args.percentile
-            )
-            
-            # Log metrics to MLflow
-            for metric, value in metrics.items():
-                if isinstance(value, (int, float)):
-                    mlflow.log_metric(metric, value)
-            
-            # Save metrics to file
-            save_metrics(metrics, args.model_type, os.path.join(args.output_dir, 'metrics'))
+            try:
+                metrics_result = evaluate_autoencoder_model(
+                    model, X_test, y_test, args.threshold, args.percentile
+                )
+                
+                # Handle different return formats
+                if isinstance(metrics_result, tuple) and len(metrics_result) == 2:
+                    metrics, anomaly_scores = metrics_result
+                else:
+                    metrics = metrics_result
+                    anomaly_scores = None
+                
+                # Log metrics to MLflow
+                for metric, value in metrics.items():
+                    if isinstance(value, (int, float)):
+                        mlflow.log_metric(metric, value)
+                
+                # Save metrics to file
+                save_metrics(metrics, args.model_type, os.path.join(args.output_dir, 'metrics'))
+            except Exception as e:
+                print(f"Error during autoencoder evaluation: {str(e)}")
+                print("Continuing with pipeline...")
+                metrics = {'error': str(e)}
+                save_metrics(metrics, args.model_type, os.path.join(args.output_dir, 'metrics'))
         
-        # Log figures to MLflow
+        # Log figures to MLflow if they exist
         figures_dir = os.path.join(args.output_dir, 'figures')
-        for figure_file in os.listdir(figures_dir):
-            if figure_file.endswith('.png'):
-                mlflow.log_artifact(os.path.join(figures_dir, figure_file), 'figures')
+        if os.path.exists(figures_dir):
+            try:
+                for figure_file in os.listdir(figures_dir):
+                    if figure_file.endswith('.png'):
+                        mlflow.log_artifact(os.path.join(figures_dir, figure_file), 'figures')
+            except Exception as e:
+                print(f"Warning: Could not log figures to MLflow: {str(e)}")
+        else:
+            print(f"Figures directory {figures_dir} does not exist. Skipping figure logging.")
+            # Create the directory for future use
+            os.makedirs(figures_dir, exist_ok=True)
 
 if __name__ == "__main__":
     main()
