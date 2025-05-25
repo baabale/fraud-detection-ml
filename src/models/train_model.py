@@ -156,9 +156,9 @@ def save_model_artifacts(model, model_type, scaler, feature_names, params, resul
     os.makedirs(model_dir, exist_ok=True)
     print(f"Saving model artifacts to {model_dir}")
     
-    # Save model
-    model_path = os.path.join(model_dir, f"{params['run_name']}_model.h5")
-    model.save(model_path)
+    # Save model using native Keras format
+    model_path = os.path.join(model_dir, f"{params['run_name']}_model.keras")
+    model.save(model_path, save_format='keras')
     
     # Save scaler
     scaler_path = os.path.join(model_dir, f"{params['run_name']}_scaler.joblib")
@@ -363,7 +363,7 @@ def train_classification_model(X_train, y_train, X_val, y_val, input_dim, batch_
     return model, history
 
 def run_classification_experiment(X_train, X_val, X_test, y_train, y_val, y_test, 
-                                 input_dim, params, model_dir):
+                                 input_dim, params, model_dir, feature_names=None):    
     """
     Run a classification model experiment with MLflow tracking.
     
@@ -373,6 +373,7 @@ def run_classification_experiment(X_train, X_val, X_test, y_train, y_val, y_test
         input_dim: Input dimension
         params: Model and training parameters
         model_dir: Directory to save the model
+        feature_names: List of feature names
         
     Returns:
         dict: Evaluation metrics
@@ -446,8 +447,22 @@ def run_classification_experiment(X_train, X_val, X_test, y_train, y_val, y_test
         mlflow.log_figure(fig, "confusion_matrix.png")
         plt.close(fig)
         
-        # Log model
-        mlflow.tensorflow.log_model(model, "model")
+        # Create model signature
+        from mlflow.models.signature import infer_signature
+
+        # Generate a sample input for signature
+        signature = infer_signature(X_test[:1], model.predict(X_test[:1]))
+
+        # Log model with signature and sample input
+        mlflow.tensorflow.log_model(
+            model, 
+            "classification_model",
+            signature=signature,
+            input_example=X_test[:1]
+        )
+
+        # Log feature names
+        mlflow.log_dict(feature_names, "feature_names.json")
         
         return model, metrics
 
@@ -525,7 +540,7 @@ def train_autoencoder_model(X_train, X_val, input_dim, batch_size=256, epochs=20
     return model, history
 
 def run_autoencoder_experiment(X_train, X_val, X_test, y_train, y_val, y_test, 
-                              input_dim, params, model_dir):
+                              input_dim, params, model_dir, feature_names=None):
     """
     Run an autoencoder model experiment with MLflow tracking.
     
@@ -535,6 +550,7 @@ def run_autoencoder_experiment(X_train, X_val, X_test, y_train, y_val, y_test,
         input_dim: Input dimension
         params: Model and training parameters
         model_dir: Directory to save the model
+        feature_names: List of feature names
         
     Returns:
         dict: Evaluation metrics
@@ -613,8 +629,26 @@ def run_autoencoder_experiment(X_train, X_val, X_test, y_train, y_val, y_test,
         plt.close(fig)
         
         # Log model
-        mlflow.tensorflow.log_model(model, "model")
-        
+        # Create model signature
+        from mlflow.models.signature import infer_signature
+
+        # Generate a sample input for signature
+        signature = infer_signature(X_test[:1], model.predict(X_test[:1]))
+
+        # Log model with signature and sample input
+        mlflow.tensorflow.log_model(
+            model, 
+            "autoencoder_model",
+            signature=signature,
+            input_example=X_test[:1]
+        )
+
+        # Log feature names
+        mlflow.log_dict(feature_names, "feature_names.json")
+
+        # Log threshold value
+        if 'threshold' in metrics:
+            mlflow.log_dict({"threshold": float(metrics['threshold'])}, "threshold.json")        
         return model, metrics
 
 def main():
@@ -688,10 +722,12 @@ def main():
         
         # Run classification experiment
         print("Training classification model...")
+        # For classification model
         classification_model, classification_metrics = run_classification_experiment(
             X_train, X_val, X_test, y_train, y_val, y_test,
-            input_dim, classification_params, model_dir
+            input_dim, classification_params, model_dir, feature_names
         )
+        
         print("Classification model results:")
         for metric, value in classification_metrics.items():
             if not isinstance(value, list):
@@ -724,10 +760,12 @@ def main():
         
         # Run autoencoder experiment
         print("Training autoencoder model...")
+        # For autoencoder model
         autoencoder_model, autoencoder_metrics = run_autoencoder_experiment(
             X_train, X_val, X_test, y_train, y_val, y_test,
-            input_dim, autoencoder_params, model_dir
+            input_dim, autoencoder_params, model_dir, feature_names
         )
+        
         print("Autoencoder model results:")
         for metric, value in autoencoder_metrics.items():
             if not isinstance(value, list):

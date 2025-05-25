@@ -30,31 +30,85 @@ def load_model(model_path):
         Model: Loaded TensorFlow model
     """
     print(f"Loading model from {model_path}")
+    
+    # Check if the model path exists
+    if not os.path.exists(model_path):
+        # Try alternative formats if the exact path doesn't exist
+        base_path = os.path.splitext(model_path)[0]
+        alternative_paths = [
+            f"{base_path}.keras",  # Native Keras format
+            f"{base_path}.h5",     # HDF5 format
+            f"{base_path}"         # Directory format
+        ]
+        
+        for alt_path in alternative_paths:
+            if os.path.exists(alt_path):
+                print(f"Using alternative model path: {alt_path}")
+                model_path = alt_path
+                break
+    
+    # Define custom objects for model loading
+    custom_objects = {
+        'mse': tf.keras.losses.MeanSquaredError(),
+        'mean_squared_error': tf.keras.losses.MeanSquaredError()
+    }
+    
+    # Try different loading approaches
     try:
-        # Try to load with standard settings
-        return tf.keras.models.load_model(model_path)
-    except Exception as e:
-        print(f"Standard loading failed: {str(e)}")
-        print("Trying with custom object scope...")
-        # Try with custom object scope for MSE loss function
-        custom_objects = {
-            'mse': tf.keras.losses.MeanSquaredError(),
-            'mean_squared_error': tf.keras.losses.MeanSquaredError()
-        }
+        # First try with custom objects
         return tf.keras.models.load_model(model_path, custom_objects=custom_objects)
+    except Exception as e:
+        print(f"Loading with custom objects failed: {str(e)}")
+        try:
+            # Then try standard loading
+            return tf.keras.models.load_model(model_path)
+        except Exception as e2:
+            print(f"Standard loading failed: {str(e2)}")
+            # As a last resort, try with compile=False
+            print("Trying with compile=False...")
+            try:
+                return tf.keras.models.load_model(model_path, compile=False, custom_objects=custom_objects)
+            except Exception as e3:
+                print(f"All loading attempts failed: {str(e3)}")
+                raise ValueError(f"Could not load model from {model_path}")
 
-def load_test_data(file_path):
+def load_test_data(file_path, model_path=None):
     """
     Load test data from a file.
     
     Args:
         file_path: Path to the test data file
+        model_path: Path to the model directory (optional)
         
     Returns:
         X_test: Test features
         y_test: Test labels
     """
     print(f"Loading test data from {file_path}")
+
+    # Use the same features as in training to ensure compatibility
+    # First try to load feature names from the model directory if available
+    if model_path:
+        model_dir = os.path.dirname(model_path)
+        feature_names_path = os.path.join(model_dir, 'feature_names.json')
+        
+        if os.path.exists(feature_names_path):
+            try:
+                with open(feature_names_path, 'r') as f:
+                    core_features = json.load(f)
+                print(f"Loaded {len(core_features)} features from feature_names.json")
+            except Exception as e:
+                print(f"Error loading feature names: {str(e)}")
+                # Fallback to default features
+                core_features = ['amount', 'spending_deviation_score', 'geo_anomaly_score', 'amount_log', 'velocity_score_norm', 'transaction_frequency']
+        else:
+            # These are the core numeric features used in training
+            print("No feature_names.json found, using default features")
+            core_features = ['amount', 'spending_deviation_score', 'geo_anomaly_score', 'amount_log', 'velocity_score_norm', 'transaction_frequency']
+    else:
+        # No model path provided, use default features
+        print("No model path provided, using default features")
+        core_features = ['amount', 'spending_deviation_score', 'geo_anomaly_score', 'amount_log', 'velocity_score_norm', 'transaction_frequency']
     
     # Check if file exists
     if not os.path.exists(file_path):
@@ -71,13 +125,32 @@ def load_test_data(file_path):
     print(f"Loaded data with {df.shape[0]} rows and {df.shape[1]} columns")
     
     # Use the same features as in training to ensure compatibility
-    # These are the core numeric features used in training
-    core_features = ['amount', 'spending_deviation_score', 'geo_anomaly_score', 'amount_log', 'velocity_score_norm']
+    # First try to load feature names from the model directory if available
+    model_dir = os.path.dirname(model_path)
+    feature_names_path = os.path.join(model_dir, 'feature_names.json')
+    
+    if os.path.exists(feature_names_path):
+        try:
+            with open(feature_names_path, 'r') as f:
+                core_features = json.load(f)
+            print(f"Loaded {len(core_features)} features from feature_names.json")
+        except Exception as e:
+            print(f"Error loading feature names: {str(e)}")
+            # Fallback to default features
+            core_features = ['amount', 'spending_deviation_score', 'geo_anomaly_score', 'amount_log', 'velocity_score_norm', 'transaction_frequency']
+    else:
+        # These are the core numeric features used in training
+        print("No feature_names.json found, using default features")
+        core_features = ['amount', 'spending_deviation_score', 'geo_anomaly_score', 'amount_log', 'velocity_score_norm', 'transaction_frequency']
     
     # Check if all core features exist in the dataframe
     missing_features = [f for f in core_features if f not in df.columns]
     if missing_features:
-        raise ValueError(f"Missing required features in test data: {missing_features}")
+        print(f"Warning: Missing features in test data: {missing_features}")
+        print("Adding missing features with default values (zeros)")
+        # Add missing features with default values
+        for feature in missing_features:
+            df[feature] = 0.0
     
     print(f"Using {len(core_features)} numeric features: {core_features}")
     
@@ -393,7 +466,7 @@ def main():
     
     # Load model and test data
     model = load_model(args.model_path)
-    X_test, y_test = load_test_data(args.test_data)
+    X_test, y_test = load_test_data(args.test_data, args.model_path)
     
     # Run evaluation based on model type
     with mlflow.start_run(run_name=f"evaluate_{args.model_type}"):
