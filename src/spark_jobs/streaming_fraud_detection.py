@@ -548,15 +548,48 @@ def main():
                 .option("checkpointLocation", checkpoint_dir))
     
     # Start the streaming query
-    streaming_query = query.start()
-    
-    # Wait for the query to terminate
     try:
+        print(f"\n" + "="*70)
+        if input_format == 'socket':
+            host, port = input_path.split(':')
+            print(f"⚠️ ATTEMPTING TO CONNECT TO SOCKET SERVER AT {host}:{port}")
+            print(f"   Make sure a socket server is running at this address!")
+            print(f"   You can start a test socket server with: nc -lk {port}")
+        elif input_format == 'kafka':
+            print(f"⚠️ ATTEMPTING TO CONNECT TO KAFKA BROKER AT {input_path}")
+            print(f"   Make sure Kafka is running and the topic 'transactions' exists!")
+        elif input_format == 'file':
+            print(f"⚠️ WATCHING FOR JSON FILES AT {input_path}")
+            print(f"   Make sure this directory exists and has proper permissions!")
+        print("="*70 + "\n")
+        
+        streaming_query = query.start()
+        
+        # Wait for the query to terminate
         streaming_query.awaitTermination()
     except KeyboardInterrupt:
         print("Stopping streaming query...")
-        streaming_query.stop()
+        if 'streaming_query' in locals():
+            streaming_query.stop()
         print("Query stopped.")
+    except Exception as e:
+        print(f"\n" + "="*70)
+        print(f"❌ ERROR STARTING STREAMING QUERY: {str(e)}")
+        
+        if input_format == 'socket' and 'Connection refused' in str(e):
+            print(f"\n🔍 DIAGNOSIS: No socket server running at {input_path}")
+            print(f"\n💡 SOLUTION: Start a socket server with the following command:")
+            print(f"   nc -lk {input_path.split(':')[1]}")
+            print(f"\n📝 EXAMPLE DATA TO SEND:")
+            print(f"   {{\"transaction_id\":\"TX123\",\"timestamp\":\"2025-05-27T12:30:00\",\"amount\":150.75,\"sender_account\":\"ACC001\",\"receiver_account\":\"ACC002\",\"merchant_category\":\"retail\"}}")
+        elif input_format == 'kafka':
+            print(f"\n🔍 DIAGNOSIS: Cannot connect to Kafka broker at {input_path}")
+            print(f"\n💡 SOLUTION: Make sure Kafka is running and properly configured")
+        elif input_format == 'file':
+            print(f"\n🔍 DIAGNOSIS: Issue with file input at {input_path}")
+            print(f"\n💡 SOLUTION: Verify the directory exists and has proper permissions")
+            
+        print("="*70 + "\n")
 
 if __name__ == "__main__":
     main()

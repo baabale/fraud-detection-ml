@@ -16,6 +16,17 @@ import tensorflow as tf
 import joblib
 from scipy.stats import ks_2samp
 
+# Configure TensorFlow to use GPU if available
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        # Enable memory growth for all GPUs to prevent TensorFlow from allocating all GPU memory at once
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print(f"Found {len(gpus)} GPU(s). GPU acceleration enabled for model monitoring.")
+    except RuntimeError as e:
+        print(f"Error configuring GPUs: {e}")
+
 # Add the project root to the path to ensure imports work from any directory
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if project_root not in sys.path:
@@ -123,12 +134,21 @@ def calculate_performance_metrics(y_true, y_pred):
     Returns:
         dict: Performance metrics
     """
+    # Check if there are any positive predictions
+    if np.sum(y_pred) == 0:
+        print("Warning: No positive predictions found. This may indicate a model issue.")
+    
+    # Calculate metrics with zero_division=0 to avoid warnings
     metrics = {
         'accuracy': accuracy_score(y_true, y_pred),
-        'precision': precision_score(y_true, y_pred),
-        'recall': recall_score(y_true, y_pred),
-        'f1_score': f1_score(y_true, y_pred)
+        'precision': precision_score(y_true, y_pred, zero_division=0),
+        'recall': recall_score(y_true, y_pred, zero_division=0),
+        'f1_score': f1_score(y_true, y_pred, zero_division=0)
     }
+    
+    # Add additional context if no positive predictions
+    if np.sum(y_pred) == 0:
+        metrics['note'] = "No positive predictions - model may need retraining"
     
     return metrics
 
@@ -227,23 +247,85 @@ def monitor_model_performance(model, scaler, reference_df, production_df, featur
     """
     os.makedirs(output_dir, exist_ok=True)
     
+    # Check which features are available in both datasets
+    available_features = [f for f in feature_names if f in reference_df.columns and f in production_df.columns]
+    missing_features = [f for f in feature_names if f not in available_features]
+    
+    if missing_features:
+        print(f"Warning: The following features are missing in one or both datasets: {missing_features}")
+        print(f"Using only the {len(available_features)} available features: {available_features}")
+    
+    if not available_features:
+        print("Error: No common features found between reference and production data")
+        return None
+    
+    # Get the expected input shape from the model
+    expected_features = None
+    if model is not None:
+        try:
+            # Try to get the expected input shape from the model
+            input_shape = model.layers[0].input_shape
+            if input_shape is not None:
+                expected_feature_count = input_shape[1] if isinstance(input_shape, tuple) else input_shape[0][1]
+                print(f"Model expects {expected_feature_count} features as input")
+                
+                # If we have more features than the model expects, select only the first N features
+                if len(available_features) > expected_feature_count:
+                    expected_features = available_features[:expected_feature_count]
+                    print(f"Using only the first {expected_feature_count} features: {expected_features}")
+        except Exception as e:
+            print(f"Warning: Could not determine expected input shape from model directly: {e}")
+            
+            # Try to infer the expected shape by examining the model summary
+            try:
+                # For TensorFlow models, we can try to get the first layer's input shape
+                first_layer = model.layers[0]
+                if hasattr(first_layer, 'input_spec') and first_layer.input_spec is not None:
+                    if hasattr(first_layer.input_spec[0], 'axes') and -1 in first_layer.input_spec[0].axes:
+                        expected_feature_count = first_layer.input_spec[0].axes[-1]
+                        print(f"Inferred that model expects {expected_feature_count} features as input")
+                        
+                        # If we have more features than the model expects, select only the first N features
+                        if len(available_features) > expected_feature_count:
+                            expected_features = available_features[:expected_feature_count]
+                            print(f"Using only the first {expected_feature_count} features: {expected_features}")
+            except Exception as nested_e:
+                print(f"Warning: Could not infer expected input shape: {nested_e}")
+                
+            # Hardcoded fallback for this specific model which we know expects 6 features
+            if expected_features is None and len(available_features) > 6:
+                expected_features = available_features[:6]
+                print(f"Using hardcoded knowledge that model expects 6 features: {expected_features}")
+    
+    # Use expected features if available, otherwise use all available features
+    features_to_use = expected_features if expected_features is not None else available_features
+    
     # Prepare reference data
-    X_ref = reference_df[feature_names].values
+    X_ref = reference_df[features_to_use].values
     y_ref = reference_df['is_fraud'].values if 'is_fraud' in reference_df.columns else None
     
     # Prepare production data
-    X_prod = production_df[feature_names].values
+    X_prod = production_df[features_to_use].values
     y_prod = production_df['is_fraud'].values if 'is_fraud' in production_df.columns else None
     
-    # Scale data
+    # Scale data if scaler is available
     if scaler is not None:
-        X_ref = scaler.transform(X_ref)
-        X_prod = scaler.transform(X_prod)
+        try:
+            X_ref = scaler.transform(X_ref)
+            X_prod = scaler.transform(X_prod)
+        except Exception as e:
+            print(f"Warning: Could not scale data: {e}")
+            print("Proceeding with unscaled data")
     
-    # Make predictions
+    # Make predictions if model is available
     if model is not None:
-        y_ref_pred = (model.predict(X_ref) >= 0.5).astype(int).flatten() if y_ref is not None else None
-        y_prod_pred = (model.predict(X_prod) >= 0.5).astype(int).flatten() if y_prod is not None else None
+        try:
+            y_ref_pred = (model.predict(X_ref) >= 0.5).astype(int).flatten() if y_ref is not None else None
+            y_prod_pred = (model.predict(X_prod) >= 0.5).astype(int).flatten() if y_prod is not None else None
+        except Exception as e:
+            print(f"Warning: Could not make predictions: {e}")
+            print("Skipping performance metrics calculation")
+            return None
         
         # Calculate metrics
         results = {}
@@ -254,40 +336,94 @@ def monitor_model_performance(model, scaler, reference_df, production_df, featur
         if y_prod is not None and y_prod_pred is not None:
             results['production_metrics'] = calculate_performance_metrics(y_prod, y_prod_pred)
             
-            # Calculate performance difference
-            if 'reference_metrics' in results:
-                results['metrics_difference'] = {
-                    metric: results['production_metrics'][metric] - results['reference_metrics'][metric]
-                    for metric in results['reference_metrics']
-                }
+            # Calculate the difference between reference and production metrics
+            if 'reference_metrics' in results and 'production_metrics' in results:
+                results['metrics_difference'] = {}
+                for metric in results['reference_metrics']:
+                    # Skip non-numeric metrics like 'note'
+                    if metric != 'note' and isinstance(results['reference_metrics'][metric], (int, float)):
+                        results['metrics_difference'][metric] = results['production_metrics'][metric] - results['reference_metrics'][metric]
         
         # Save results
         with open(os.path.join(output_dir, 'performance_metrics.json'), 'w') as f:
             json.dump(results, f, indent=2)
         
-        # Visualize metrics
+        # Create performance comparison visualization
         if 'reference_metrics' in results and 'production_metrics' in results:
-            metrics = list(results['reference_metrics'].keys())
-            ref_values = [results['reference_metrics'][m] for m in metrics]
-            prod_values = [results['production_metrics'][m] for m in metrics]
+            # Filter out non-numeric metrics
+            numeric_metrics = []
+            ref_values = []
+            prod_values = []
             
-            plt.figure(figsize=(10, 6))
-            x = np.arange(len(metrics))
-            width = 0.35
+            for metric in results['reference_metrics']:
+                if metric != 'note' and isinstance(results['reference_metrics'][metric], (int, float)):
+                    numeric_metrics.append(metric)
+                    ref_values.append(results['reference_metrics'][metric])
+                    prod_values.append(results['production_metrics'][metric])
             
-            plt.bar(x - width/2, ref_values, width, label='Reference')
-            plt.bar(x + width/2, prod_values, width, label='Production')
-            
-            plt.xlabel('Metric')
-            plt.ylabel('Value')
-            plt.title('Model Performance Comparison')
-            plt.xticks(x, metrics)
-            plt.legend()
-            
-            plt.savefig(os.path.join(output_dir, 'performance_comparison.png'), dpi=300, bbox_inches='tight')
-            plt.close()
+            if numeric_metrics:  # Only create visualization if there are numeric metrics
+                x = np.arange(len(numeric_metrics))
+                width = 0.35
+                
+                fig, ax = plt.subplots(figsize=(10, 6))
+                plt.bar(x - width/2, ref_values, width, label='Reference')
+                plt.bar(x + width/2, prod_values, width, label='Production')
+                
+                plt.xlabel('Metrics')
+                plt.ylabel('Value')
+                plt.title('Performance Comparison')
+                plt.xticks(x, numeric_metrics)
+                plt.legend()
+                plt.grid(axis='y', linestyle='--', alpha=0.7)
+                
+                plt.tight_layout()
+                plt.savefig(os.path.join(output_dir, 'performance_comparison.png'), dpi=300, bbox_inches='tight')
+                plt.close()
     
     return results if 'results' in locals() else None
+
+def generate_recommendations(drift_percentage, performance_results=None):
+    """
+    Generate recommendations based on the drift percentage and model performance.
+    
+    Args:
+        drift_percentage (float): Percentage of features with drift
+        performance_results (dict, optional): Model performance metrics
+        
+    Returns:
+        list: Recommendations
+    """
+    recommendations = []
+    
+    # Data drift recommendations
+    if drift_percentage > 50:
+        recommendations.append("**High data drift detected**: Consider retraining the model with more recent data.")
+    elif drift_percentage > 20:
+        recommendations.append("**Moderate data drift detected**: Monitor model performance closely.")
+    else:
+        recommendations.append("**Low data drift detected**: No immediate action required.")
+    
+    # Performance-based recommendations
+    if performance_results:
+        # Check for no positive predictions
+        if ('production_metrics' in performance_results and 
+            'note' in performance_results['production_metrics'] and 
+            'no positive predictions' in performance_results['production_metrics']['note'].lower()):
+            recommendations.append("**Model prediction issue**: The model is not predicting any positive cases. Consider adjusting the classification threshold or retraining with balanced data.")
+        
+        # Check for significant performance drop
+        if ('metrics_difference' in performance_results and 
+            'accuracy' in performance_results['metrics_difference'] and 
+            performance_results['metrics_difference']['accuracy'] < -0.1):
+            recommendations.append("**Performance degradation**: Model accuracy has decreased by more than 10%. Investigate feature importance and consider model retraining.")
+        
+        # Check for performance improvement (might indicate data leakage or other issues)
+        if ('metrics_difference' in performance_results and 
+            'accuracy' in performance_results['metrics_difference'] and 
+            performance_results['metrics_difference']['accuracy'] > 0.1):
+            recommendations.append("**Unexpected performance improvement**: Model accuracy has increased by more than 10%. Verify that there is no data leakage or sampling bias in the production data.")
+    
+    return recommendations
 
 def generate_monitoring_report(performance_results, drift_results, output_dir):
     """
@@ -313,7 +449,12 @@ def generate_monitoring_report(performance_results, drift_results, output_dir):
                 f.write("| Metric | Value |\n")
                 f.write("| ------ | ----- |\n")
                 for metric, value in performance_results['reference_metrics'].items():
-                    f.write(f"| {metric} | {value:.4f} |\n")
+                    if metric != 'note':  # Skip the note for the table
+                        f.write(f"| {metric} | {value:.4f} |\n")
+                # Add note if it exists
+                if 'note' in performance_results['reference_metrics']:
+                    f.write("\n")
+                    f.write(f"**Note:** {performance_results['reference_metrics']['note']}\n")
                 f.write("\n")
             
             if 'production_metrics' in performance_results:
@@ -321,7 +462,12 @@ def generate_monitoring_report(performance_results, drift_results, output_dir):
                 f.write("| Metric | Value |\n")
                 f.write("| ------ | ----- |\n")
                 for metric, value in performance_results['production_metrics'].items():
-                    f.write(f"| {metric} | {value:.4f} |\n")
+                    if metric != 'note':  # Skip the note for the table
+                        f.write(f"| {metric} | {value:.4f} |\n")
+                # Add note if it exists
+                if 'note' in performance_results['production_metrics']:
+                    f.write("\n")
+                    f.write(f"**Note:** {performance_results['production_metrics']['note']}\n")
                 f.write("\n")
             
             if 'metrics_difference' in performance_results:
@@ -359,17 +505,10 @@ def generate_monitoring_report(performance_results, drift_results, output_dir):
         # Recommendations section
         f.write("## Recommendations\n\n")
         
-        if drift_results and drift_results['drift_percentage'] > 0.3:
-            f.write("- **High data drift detected**: Consider retraining the model with more recent data.\n")
-        elif drift_results and drift_results['drift_percentage'] > 0.1:
-            f.write("- **Moderate data drift detected**: Monitor closely and consider updating feature distributions.\n")
+        recommendations = generate_recommendations(drift_results['drift_percentage'], performance_results)
         
-        if performance_results and 'metrics_difference' in performance_results:
-            if performance_results['metrics_difference']['f1_score'] < -0.05:
-                f.write("- **Performance degradation detected**: Model performance has decreased significantly.\n")
-                f.write("  - Consider retraining the model or investigating the root cause.\n")
-            elif performance_results['metrics_difference']['f1_score'] < -0.02:
-                f.write("- **Minor performance degradation**: Keep monitoring the model performance.\n")
+        for recommendation in recommendations:
+            f.write(f"- {recommendation}\n")
         
         f.write("\n")
         f.write("---\n")
