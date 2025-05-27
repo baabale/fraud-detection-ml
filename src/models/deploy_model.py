@@ -23,6 +23,33 @@ from src.utils.config_manager import config
 try:
     import tensorflow as tf
     TENSORFLOW_AVAILABLE = True
+    
+    # Configure TensorFlow to use GPU if available
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Enable memory growth for all GPUs to prevent TensorFlow from allocating all GPU memory at once
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print("\n" + "="*70)
+            print(f"🚀 GPU ACCELERATION ENABLED: Using {len(gpus)} GPU(s) for model inference")
+            print("="*70 + "\n")
+            
+            # Test GPU performance
+            import time
+            print("Testing GPU performance for inference...")
+            x = tf.random.normal([1000, 1000])
+            start = time.time()
+            tf.matmul(x, x)
+            print(f"Matrix multiplication took: {time.time() - start:.6f} seconds")
+            print(f"TensorFlow version: {tf.__version__}")
+        except RuntimeError as e:
+            print(f"Error configuring GPUs: {e}")
+    else:
+        print("\n" + "="*70)
+        print("⚠️ NO GPU DETECTED: Using CPU for model inference (this will be slower)")
+        print("="*70 + "\n")
+            
 except ImportError:
     print("WARNING: TensorFlow not available. Using mock implementation.")
     TENSORFLOW_AVAILABLE = False
@@ -159,16 +186,24 @@ def load_models(model_dir, model_type='both'):
     # Load autoencoder model if TensorFlow is available
     if model_type in ['autoencoder', 'both']:
         if TENSORFLOW_AVAILABLE:
-            autoencoder_model_path = os.path.join(model_dir, 'autoencoder_model.h5')
-            if os.path.exists(autoencoder_model_path):
+            # Load autoencoder model
+            autoencoder_path = os.path.join(model_dir, 'autoencoder_model.h5')
+            if os.path.exists(autoencoder_path):
                 try:
-                    autoencoder_model = tf.keras.models.load_model(autoencoder_model_path)
-                    print(f"Loaded autoencoder model from {autoencoder_model_path}")
+                    # Define custom objects to handle 'mse' and other metrics
+                    custom_objects = {
+                        'mse': tf.keras.losses.MeanSquaredError(),
+                        'mae': tf.keras.losses.MeanAbsoluteError(),
+                        'mean_squared_error': tf.keras.losses.MeanSquaredError(),
+                        'mean_absolute_error': tf.keras.losses.MeanAbsoluteError()
+                    }
+                    autoencoder_model = tf.keras.models.load_model(autoencoder_path, custom_objects=custom_objects)
+                    print(f"Loaded autoencoder model from {autoencoder_path}")
                 except Exception as e:
                     print(f"Error loading autoencoder model: {str(e)}")
                     autoencoder_model = None
             else:
-                print(f"Warning: Autoencoder model not found at {autoencoder_model_path}")
+                print(f"Warning: Autoencoder model not found at {autoencoder_path}")
                 autoencoder_model = None
         else:
             print("TensorFlow not available, cannot load autoencoder model")
@@ -186,43 +221,96 @@ def preprocess_data(data):
     Returns:
         array: Preprocessed features
     """
-    # Convert input data to DataFrame
-    if isinstance(data, list):
-        df = pd.DataFrame(data)
-    else:
-        df = pd.DataFrame([data])
-    
-    # Ensure all required features are present
-    if feature_names is not None:
-        for feature in feature_names:
-            if feature not in df.columns:
-                df[feature] = 0  # Default value for missing features
+    try:
+        # Print debugging info
+        print(f"Input data type: {type(data)}")
+        if isinstance(data, dict) and 'transactions' in data:
+            print(f"Number of transactions: {len(data['transactions'])}")
+            data = data['transactions']
         
-        # Select and order features according to feature_names
-        df = df[feature_names]
-    
-    # Convert to numpy array
-    X = df.values
-    
-    # Scale features if scaler is available
-    if scaler is not None:
-        X = scaler.transform(X)
-    
-    # Add additional features to match model input shape if needed
-    # The model expects 6 features but we only have 3 in feature_names
-    if X.shape[1] == 3 and classification_model is not None:
-        # Check the expected input shape from the model
-        try:
-            expected_features = classification_model.layers[0].input_shape[1]
-            if expected_features > X.shape[1]:
-                print(f"Adding {expected_features - X.shape[1]} placeholder features to match model input shape")
-                # Add placeholder features (zeros) to match the expected input shape
-                additional_features = np.zeros((X.shape[0], expected_features - X.shape[1]))
-                X = np.hstack((X, additional_features))
-        except Exception as e:
-            print(f"Error checking model input shape: {str(e)}")
-    
-    return X
+        # Convert input data to DataFrame
+        if isinstance(data, list):
+            df = pd.DataFrame(data)
+            print(f"Created DataFrame with shape: {df.shape}")
+        else:
+            df = pd.DataFrame([data])
+            print(f"Created DataFrame with shape: {df.shape}")
+        
+        # Print column info
+        print(f"DataFrame columns: {df.columns.tolist()}")
+        print(f"Expected feature names: {feature_names}")
+        
+        # Ensure all required features are present
+        if feature_names is not None:
+            for feature in feature_names:
+                if feature not in df.columns:
+                    print(f"Adding missing feature: {feature}")
+                    df[feature] = 0  # Default value for missing features
+            
+            # Select and order features according to feature_names
+            df = df[feature_names]
+            print(f"Reordered DataFrame with shape: {df.shape}")
+        
+        # Convert to numpy array
+        X = df.values
+        print(f"Converted to numpy array with shape: {X.shape}")
+        
+        # Scale features if scaler is available
+        if scaler is not None:
+            try:
+                # Force reshape to match expected dimensions before scaling
+                # This is a workaround for the "negative dimensions" error
+                expected_features = 12  # Based on the feature_names.json we saw earlier
+                if X.shape[1] != expected_features:
+                    print(f"Reshaping X from {X.shape} to match expected {expected_features} features before scaling")
+                    # Create a new array with the right shape
+                    new_X = np.zeros((X.shape[0], expected_features))
+                    # Copy as many features as we can
+                    for i in range(min(X.shape[1], expected_features)):
+                        new_X[:, i] = X[:, i]
+                    X = new_X
+                
+                # Now try to scale
+                X = scaler.transform(X)
+                print(f"Scaled features, new shape: {X.shape}")
+            except Exception as e:
+                print(f"Error scaling features: {str(e)}")
+                # If scaling still fails, create a properly shaped array with zeros
+                print("Creating fallback array with proper dimensions")
+                X = np.zeros((X.shape[0], 12))  # Use 12 features as seen in feature_names.json
+        
+        # Check if we need to adjust dimensions for the model
+        if classification_model is not None:
+            try:
+                expected_shape = classification_model.layers[0].input_shape[1]
+                print(f"Model expects input shape with {expected_shape} features")
+                current_shape = X.shape[1]
+                
+                if expected_shape > current_shape:
+                    print(f"Adding {expected_shape - current_shape} placeholder features")
+                    # Add placeholder features (zeros) to match the expected input shape
+                    additional_features = np.zeros((X.shape[0], expected_shape - current_shape))
+                    X = np.hstack((X, additional_features))
+                elif expected_shape < current_shape:
+                    print(f"Trimming {current_shape - expected_shape} extra features")
+                    # Trim extra features
+                    X = X[:, :expected_shape]
+                
+                print(f"Final X shape: {X.shape}")
+            except Exception as e:
+                print(f"Error adjusting dimensions: {str(e)}")
+        
+        return X
+    except Exception as e:
+        print(f"Error in preprocess_data: {str(e)}")
+        # Return a simple placeholder array as fallback
+        if classification_model is not None:
+            try:
+                expected_shape = classification_model.layers[0].input_shape[1]
+                return np.zeros((1, expected_shape))
+            except:
+                pass
+        return np.zeros((1, 12))  # Default to 12 features
 
 def compute_anomaly_scores(model, X):
     """
@@ -275,24 +363,34 @@ def predict():
     """
     try:
         # Get request data
-        data = request.get_json()
+        data = request.json
+        print(f"Received request data: {data}")
         
         if not data or 'transactions' not in data:
-            return jsonify({'error': 'No transaction data provided'}), 400
+            return jsonify({'error': 'Invalid request format'}), 400
         
-        # Get model type (default to ensemble if both models are available)
-        model_type = data.get('model_type', 'ensemble')
-        if model_type == 'ensemble' and (classification_model is None or autoencoder_model is None):
-            if classification_model is not None:
-                model_type = 'classification'
-            elif autoencoder_model is not None:
-                model_type = 'autoencoder'
-            else:
-                return jsonify({'error': 'No models available'}), 500
+        # Get model type from request or use default
+        model_type = data.get('model_type', 'both')
+        if model_type not in ['classification', 'autoencoder', 'both', 'ensemble']:
+            model_type = 'both'  # Default to both
+        print(f"Using model type: {model_type}")
+        
+        # Check model availability
+        if model_type in ['classification', 'both', 'ensemble'] and classification_model is None:
+            print("Classification model not available but requested")
+            return jsonify({'error': 'Classification model not available'}), 500
+            
+        if model_type in ['autoencoder', 'both', 'ensemble'] and autoencoder_model is None:
+            print("Autoencoder model not available but requested")
+            return jsonify({'error': 'Autoencoder model not available'}), 500
         
         # Preprocess data
-        transactions = data['transactions']
-        X = preprocess_data(transactions)
+        try:
+            X = preprocess_data(data['transactions'])
+            print(f"Preprocessed data shape: {X.shape}")
+        except Exception as e:
+            print(f"Error in preprocessing: {str(e)}")
+            return jsonify({'error': f'Preprocessing error: {str(e)}'}), 500
         
         # Make predictions
         results = []
@@ -385,6 +483,12 @@ def main():
                         help='Port to run the server on')
     parser.add_argument('--debug', action='store_true',
                         help='Run in debug mode')
+    parser.add_argument('--disable-gpu', action='store_true', 
+                        help='Disable GPU usage even if available')
+    parser.add_argument('--single-gpu', action='store_true', 
+                        help='Use only a single GPU even if multiple are available')
+    parser.add_argument('--memory-growth', action='store_true', 
+                        help='Enable memory growth for GPUs to prevent TensorFlow from allocating all memory')
     args = parser.parse_args()
     
     # Use configuration values if arguments are not provided

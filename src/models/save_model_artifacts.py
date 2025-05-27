@@ -140,17 +140,30 @@ def save_model_artifacts(model_path, data_path, output_dir, threshold_percentile
                 'is_fraud': np.random.choice([0, 1], 1000, p=[0.95, 0.05])
             })
         
-        # Separate features and target
+        # Process data
+        # Remove target variable and non-numeric columns
         if 'is_fraud' in df.columns:
             y = df['is_fraud'].values
-            X = df.drop(columns=['is_fraud'])
+            # Drop non-numeric columns and 'is_fraud'
+            X_df = df.drop('is_fraud', axis=1)
+            # Check for non-numeric columns
+            non_numeric_cols = X_df.select_dtypes(exclude=['number']).columns.tolist()
+            if non_numeric_cols:
+                print(f"Dropping non-numeric columns: {non_numeric_cols}")
+                X_df = X_df.drop(non_numeric_cols, axis=1)
+            X = X_df.values
         else:
-            print("Target column 'is_fraud' not found in data, creating mock target")
-            y = np.random.choice([0, 1], len(df), p=[0.95, 0.05])
-            X = df
+            # No target variable, use all features but drop non-numeric columns
+            X_df = df.copy()
+            # Check for non-numeric columns
+            non_numeric_cols = X_df.select_dtypes(exclude=['number']).columns.tolist()
+            if non_numeric_cols:
+                print(f"Dropping non-numeric columns: {non_numeric_cols}")
+                X_df = X_df.drop(non_numeric_cols, axis=1)
+            X = X_df.values
         
         # Save feature names
-        feature_names = X.columns.tolist()
+        feature_names = X_df.columns.tolist()
         with open(os.path.join(output_dir, 'feature_names.json'), 'w') as f:
             json.dump(feature_names, f)
         print(f"Saved {len(feature_names)} feature names")
@@ -292,10 +305,71 @@ def main():
                         help='Directory to save artifacts')
     parser.add_argument('--threshold-percentile', type=int, default=95,
                         help='Percentile for autoencoder threshold')
+    parser.add_argument('--model-dir', type=str, help='Directory containing the models (alternative to specifying individual models)')
+    parser.add_argument('--disable-gpu', action='store_true', help='Disable GPU usage even if available')
+    parser.add_argument('--single-gpu', action='store_true', help='Use only a single GPU even if multiple are available')
+    parser.add_argument('--memory-growth', action='store_true', help='Enable memory growth for GPUs to prevent TensorFlow from allocating all memory')
     args = parser.parse_args()
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    # If model-dir is provided, use it to find models
+    if args.model_dir and os.path.exists(args.model_dir):
+        # Look for classification model in model_dir
+        classification_model_path = os.path.join(args.model_dir, 'classification_model_model.h5')
+        if not os.path.exists(classification_model_path):
+            classification_model_path = os.path.join(args.model_dir, 'classification_model.h5')
+        
+        # Look for autoencoder model in model_dir
+        autoencoder_model_path = os.path.join(args.model_dir, 'autoencoder_model_model.h5')
+        if not os.path.exists(autoencoder_model_path):
+            autoencoder_model_path = os.path.join(args.model_dir, 'autoencoder_model.h5')
+        
+        # Update the model paths if found
+        if os.path.exists(classification_model_path):
+            args.classification_model = classification_model_path
+        if os.path.exists(autoencoder_model_path):
+            args.autoencoder_model = autoencoder_model_path
+    
+    # Configure TensorFlow GPU settings if TensorFlow is available
+    if TENSORFLOW_AVAILABLE:
+        try:
+            import tensorflow as tf
+            gpus = tf.config.list_physical_devices('GPU')
+            
+            if args.disable_gpu:
+                # Disable all GPUs
+                tf.config.set_visible_devices([], 'GPU')
+                print("\n" + "="*70)
+                print("⚠️ GPU DISABLED: Using CPU for model operations as requested")
+                print("="*70 + "\n")
+            elif gpus:
+                if args.single_gpu and len(gpus) > 1:
+                    # Use only the first GPU
+                    tf.config.set_visible_devices(gpus[0], 'GPU')
+                    print(f"\n" + "="*70)
+                    print(f"🚀 SINGLE GPU MODE: Using only one GPU ({gpus[0]}) for model operations")
+                    print("="*70 + "\n")
+                
+                if args.memory_growth:
+                    # Enable memory growth for all GPUs
+                    for gpu in gpus:
+                        tf.config.experimental.set_memory_growth(gpu, True)
+                    print("\n" + "="*70)
+                    print(f"🚀 MEMORY GROWTH ENABLED: GPUs will allocate memory as needed")
+                    print("="*70 + "\n")
+                
+                if not args.single_gpu and not args.disable_gpu:
+                    print("\n" + "="*70)
+                    print(f"🚀 GPU ACCELERATION ENABLED: Using {len(gpus)} GPU(s) for model operations")
+                    print("="*70 + "\n")
+            else:
+                print("\n" + "="*70)
+                print("⚠️ NO GPU DETECTED: Using CPU for model operations")
+                print("="*70 + "\n")
+        except Exception as e:
+            print(f"Error configuring GPUs: {e}")
     
     # Save classification model artifacts
     if os.path.exists(args.classification_model):

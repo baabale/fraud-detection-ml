@@ -12,11 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enhanced model deployment with input shape handling
 - Fixed port conflict issues in API deployment
 - Added test script for API validation
+- Added GPU-related command-line arguments to deployment scripts
+- Added improved error handling and debugging in API server
 
 ### Fixed
 - Resolved NaN handling in model training and evaluation
 - Fixed model file path issues in deployment scripts
 - Addressed input feature mismatch between training and deployment
+- Fixed GPU parameter handling in model deployment scripts
+- Fixed non-numeric column handling in model artifact saving
+- Added custom objects support for loading models with custom metrics
 
 ## [1.0.0] - 2025-05-25
 

@@ -17,6 +17,23 @@ import mlflow
 import mlflow.tensorflow
 import json
 
+# Configure TensorFlow to use GPU if available
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        # Enable memory growth for all GPUs to prevent TensorFlow from allocating all GPU memory at once
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print("\n" + "="*70)
+        print(f"🚀 GPU ACCELERATION ENABLED: Using {len(gpus)} GPU(s) for model evaluation")
+        print("="*70 + "\n")
+    except RuntimeError as e:
+        print(f"Error configuring GPUs: {e}")
+else:
+    print("\n" + "="*70)
+    print("⚠️ NO GPU DETECTED: Using CPU for model evaluation (this will be slower)")
+    print("="*70 + "\n")
+
 from fraud_model import compute_anomaly_scores
 
 def load_model(model_path):
@@ -459,6 +476,14 @@ def main():
                         help='Percentile for threshold determination (autoencoder only)')
     parser.add_argument('--output-dir', type=str, default='../../results',
                         help='Directory to save evaluation results')
+    
+    # Add GPU-related arguments to match the pipeline's parameters
+    parser.add_argument('--disable-gpu', action='store_true',
+                        help='Disable GPU usage even if available')
+    parser.add_argument('--single-gpu', action='store_true',
+                        help='Use only a single GPU even if multiple are available')
+    parser.add_argument('--memory-growth', action='store_true',
+                        help='Enable memory growth for GPUs to prevent TensorFlow from allocating all memory')
     args = parser.parse_args()
     
     # Set up MLflow
