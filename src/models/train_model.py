@@ -9,9 +9,51 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import logging
+import warnings
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, precision_recall_curve
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, precision_recall_curve, roc_auc_score
+
+# Filter sklearn warnings to avoid excessive logging
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
+# Specifically filter out the precision warning that's causing most of the noise
+warnings.filterwarnings('ignore', message='Precision is ill-defined and being set to 0.0')
+# Filter TensorFlow deprecation warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+# Filter TensorFlow model saving format warnings
+warnings.filterwarnings('ignore', message='.*save_format.*is deprecated in Keras 3.*')
+warnings.filterwarnings('ignore', message='.*HDF5 file.*is considered legacy.*')
+# Filter optimizer variable mismatch warnings
+warnings.filterwarnings('ignore', message='.*Skipping variable loading for optimizer.*')
+# Filter absl warnings
+warnings.filterwarnings('ignore', module='absl')
+
+# Configure logging for real-time output
+os.makedirs('logs', exist_ok=True)
+
+# Check if the root logger already has handlers to avoid duplicate logging
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('logs/train_model.log'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+
+# Get a logger specific to this module
+logger = logging.getLogger('fraud_detection_training')
+
+# Force stdout to flush immediately
+sys.stdout.reconfigure(line_buffering=True)
+
+# Import custom modules for advanced sampling and loss functions
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from src.utils.advanced_sampling import get_sampling_technique
+from src.utils.custom_losses import get_loss_function
 
 # Parse command-line arguments before importing TensorFlow
 # This allows us to configure GPU settings before any TensorFlow operations
@@ -39,6 +81,33 @@ def parse_args():
                         help='MLflow tracking server URI')
     parser.add_argument('--experiment-name', type=str,
                         help='MLflow experiment name')
+    
+    # Advanced sampling arguments
+    parser.add_argument('--sampling-technique', type=str, 
+                        choices=['none', 'smote', 'adasyn', 'borderline_smote'],
+                        default='none', help='Advanced sampling technique to use')
+    parser.add_argument('--sampling-ratio', type=float, default=0.5,
+                        help='Desired ratio of minority to majority class after sampling')
+    parser.add_argument('--k-neighbors', type=int, default=5,
+                        help='Number of nearest neighbors for sampling techniques')
+    
+    # Custom loss function arguments
+    parser.add_argument('--loss-function', type=str,
+                        choices=['binary_crossentropy', 'focal', 'weighted_focal', 
+                                 'asymmetric_focal', 'adaptive_focal'],
+                        default='binary_crossentropy', help='Loss function to use')
+    parser.add_argument('--focal-gamma', type=float, default=2.0,
+                        help='Focusing parameter for focal loss')
+    parser.add_argument('--focal-alpha', type=float, default=0.25,
+                        help='Alpha parameter for focal loss')
+    
+    # Class weighting arguments
+    parser.add_argument('--class-weight-ratio', type=float, default=None,
+                        help='Weight ratio for positive class (fraud) to negative class')
+    
+    # Regularization arguments
+    parser.add_argument('--l2-regularization', type=float, default=0.0,
+                        help='L2 regularization parameter for model weights')
     
     # GPU-specific arguments
     parser.add_argument('--disable-gpu', action='store_true',
@@ -126,7 +195,7 @@ if project_root not in sys.path:
 # Import the configuration manager
 from src.utils.config_manager import config
 
-def load_and_preprocess_data(data_path, test_size=0.2, val_size=0.25, random_state=42):
+def load_and_preprocess_data(data_path, test_size=0.2, val_size=0.25, random_state=42, sampling_technique='none', sampling_ratio=0.5, k_neighbors=5):
     """
     Load and preprocess data for model training.
     
@@ -135,6 +204,9 @@ def load_and_preprocess_data(data_path, test_size=0.2, val_size=0.25, random_sta
         test_size (float): Proportion of data to use for testing
         val_size (float): Proportion of training data to use for validation
         random_state (int): Random seed for reproducibility
+        sampling_technique (str): Advanced sampling technique to use ('none', 'smote', 'adasyn', 'borderline_smote')
+        sampling_ratio (float): Desired ratio of minority to majority class after sampling
+        k_neighbors (int): Number of nearest neighbors for sampling techniques
         
     Returns:
         tuple: X_train, X_val, X_test, y_train, y_val, y_test, feature_names, scaler
@@ -222,25 +294,70 @@ def load_and_preprocess_data(data_path, test_size=0.2, val_size=0.25, random_sta
     
     # Split into train and test sets
     if len(unique_classes) > 1:
-        # Use stratified split if multiple classes
+        # Split the data into training, validation, and test sets
         X_train_val, X_test, y_train_val, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
+            X, y, test_size=test_size, random_state=random_state, stratify=y
         )
         
-        # Split training data into train and validation sets
         X_train, X_val, y_train, y_val = train_test_split(
-            X_train_val, y_train_val, test_size=0.25, random_state=42, stratify=y_train_val
+            X_train_val, y_train_val, test_size=val_size, random_state=random_state, stratify=y_train_val
         )
+        
+        # Apply advanced sampling techniques to the training data if specified
+        if sampling_technique != 'none':
+            print(f"\nApplying {sampling_technique} with sampling_ratio={sampling_ratio} and k_neighbors={k_neighbors}")
+            # Get the sampling function
+            sampling_func = get_sampling_technique(sampling_technique)
+            if sampling_func is not None:
+                try:
+                    # Print class distribution before sampling
+                    class_counts_before = np.bincount(y_train.astype(int))
+                    print(f"Class distribution before sampling: {class_counts_before}")
+                    if len(class_counts_before) > 1:
+                        fraud_ratio_before = class_counts_before[1] / len(y_train) * 100
+                        print(f"Fraud ratio before sampling: {fraud_ratio_before:.2f}%")
+                    
+                    # Apply the sampling technique
+                    X_train_resampled, y_train_resampled = sampling_func(
+                        X_train, y_train, 
+                        sampling_strategy=sampling_ratio,
+                        k_neighbors=k_neighbors,
+                        random_state=random_state
+                    )
+                    
+                    # Update the training data
+                    X_train = X_train_resampled
+                    y_train = y_train_resampled
+                    
+                    # Print class distribution after sampling
+                    class_counts_after = np.bincount(y_train.astype(int))
+                    print(f"Class distribution after sampling: {class_counts_after}")
+                    if len(class_counts_after) > 1:
+                        fraud_ratio_after = class_counts_after[1] / len(y_train) * 100
+                        print(f"Fraud ratio after sampling: {fraud_ratio_after:.2f}%")
+                        print(f"Sampling increased fraud ratio from {fraud_ratio_before:.2f}% to {fraud_ratio_after:.2f}%")
+                except Exception as e:
+                    print(f"Error applying sampling technique: {str(e)}")
+                    print("Using original data without sampling.")
+            else:
+                print(f"Warning: Unknown sampling technique '{sampling_technique}'. Using original data.")
+        else:
+            print("\nNo advanced sampling technique applied.")
+            
+        # Print class distribution in training data
+        unique, counts = np.unique(y_train, return_counts=True)
+        print(f"Class distribution in training data: {dict(zip(unique, counts))}")
+        print(f"Fraud ratio in training data: {np.sum(y_train == 1) / len(y_train):.4f}")
     else:
         # Use regular split if only one class (no stratification needed)
         print("Warning: Only one class present. Using regular train/test split without stratification.")
         X_train_val, X_test, y_train_val, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
+            X, y, test_size=test_size, random_state=random_state
         )
         
         # Split training data into train and validation sets
         X_train, X_val, y_train, y_val = train_test_split(
-            X_train_val, y_train_val, test_size=0.25, random_state=42
+            X_train_val, y_train_val, test_size=val_size, random_state=random_state
         )
     
     # Scale the features
@@ -411,7 +528,43 @@ def evaluate_autoencoder_model(model, X_test, y_test, threshold=None):
     
     return metrics, anomaly_scores
 
-def train_classification_model(X_train, y_train, X_val, y_val, input_dim, hidden_layers=[64, 32], learning_rate=0.001, batch_size=64, epochs=50, class_weight=None, model_path=None):
+def get_loss_function_for_model(loss_function_name, focal_gamma=2.0, focal_alpha=0.25, class_weights=None):
+    """
+    Get the appropriate loss function based on name.
+    
+    Args:
+        loss_function_name (str): Name of the loss function
+        focal_gamma (float): Focusing parameter for focal loss
+        focal_alpha (float): Alpha parameter for focal loss
+        class_weights (dict): Class weights for weighted loss functions
+        
+    Returns:
+        Loss function to use in model compilation
+    """
+    if loss_function_name == 'binary_crossentropy':
+        return 'binary_crossentropy'
+    
+    # Get custom loss function
+    try:
+        loss_params = {
+            'gamma': focal_gamma,
+            'alpha': focal_alpha
+        }
+        
+        # For weighted_focal loss, add class weights
+        if loss_function_name == 'weighted_focal' and class_weights is not None:
+            loss_params['class_weights'] = class_weights
+            
+        loss = get_loss_function(loss_function_name, **loss_params)
+        print(f"Using custom loss function: {loss_function_name} with parameters: {loss_params}")
+        return loss
+    except Exception as e:
+        print(f"Warning: Error configuring custom loss function: {str(e)}")
+        print("Falling back to binary_crossentropy")
+        return 'binary_crossentropy'
+
+
+def train_classification_model(X_train, y_train, X_val, y_val, input_dim, hidden_layers=[64, 32], learning_rate=0.001, batch_size=64, epochs=50, class_weight=None, model_path=None, loss_function='binary_crossentropy', focal_gamma=2.0, focal_alpha=0.25, l2_regularization=0.0):
     """
     Train a classification model for fraud detection.
     
@@ -425,7 +578,11 @@ def train_classification_model(X_train, y_train, X_val, y_val, input_dim, hidden
         learning_rate (float): Learning rate for optimizer
         batch_size (int): Batch size for training
         epochs (int): Number of training epochs
-        class_weights (dict): Class weights for imbalanced data
+        class_weight (dict, optional): Class weights for imbalanced data
+        model_path (str, optional): Path to save the trained model
+        loss_function (str): Loss function to use ('binary_crossentropy', 'focal', 'weighted_focal', etc.)
+        focal_gamma (float): Focusing parameter for focal loss
+        focal_alpha (float): Alpha parameter for focal loss
         
     Returns:
         model: Trained classification model
@@ -433,45 +590,60 @@ def train_classification_model(X_train, y_train, X_val, y_val, input_dim, hidden
     # Use multi-GPU strategy if available
     if 'strategy' in globals() and strategy is not None:
         print(f"Creating classification model with multi-GPU strategy")
+        
+    # Get the appropriate loss function
+    loss = get_loss_function_for_model(
+        loss_function_name=loss_function,
+        focal_gamma=focal_gamma,
+        focal_alpha=focal_alpha,
+        class_weights=class_weight
+    )
+    
+    # Define metrics
+    metrics = ['accuracy', tf.keras.metrics.AUC(), tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
+    
+    if strategy is not None and hasattr(strategy, 'scope'):
+        # Multi-GPU model creation
         with strategy.scope():
             # Create model
             input_layer = Input(shape=(input_dim,))
-            x = Dense(hidden_layers[0], activation='relu')(input_layer)
+            x = input_layer
             
             # Add hidden layers
-            for units in hidden_layers[1:]:
-                x = Dense(units, activation='relu')(x)
-                x = Dropout(0.2)(x)
+            for units in hidden_layers:
+                x = Dense(units, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(l2_regularization))(x)
+                x = Dropout(0.4)(x)
             
             # Output layer
-            output_layer = Dense(1, activation='sigmoid')(x)
+            output_layer = Dense(1, activation='sigmoid', kernel_regularizer=tf.keras.regularizers.l2(l2_regularization))(x)
             
             # Create model
             model = Model(inputs=input_layer, outputs=output_layer)
             
             # Compile model
             optimizer = Adam(learning_rate=learning_rate)
-            model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy', AUC()])
+            model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
     else:
         # Single-GPU or CPU model creation
         # Create model
-        input_layer = Input(shape=(input_dim,))
-        x = Dense(hidden_layers[0], activation='relu')(input_layer)
+        model = Sequential()
+        model.add(Input(shape=(input_dim,)))
         
         # Add hidden layers
-        for units in hidden_layers[1:]:
-            x = Dense(units, activation='relu')(x)
-            x = Dropout(0.2)(x)
+        for units in hidden_layers:
+            model.add(Dense(units, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(l2_regularization)))
+            model.add(Dropout(0.4))
         
-        # Output layer
-        output_layer = Dense(1, activation='sigmoid')(x)
-        
-        # Create model
-        model = Model(inputs=input_layer, outputs=output_layer)
+        # Output layer (binary classification)
+        model.add(Dense(1, activation='sigmoid', kernel_regularizer=tf.keras.regularizers.l2(l2_regularization)))
         
         # Compile model
         optimizer = Adam(learning_rate=learning_rate)
-        model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy', AUC()])
+        model.compile(
+            optimizer=optimizer,
+            loss=loss,
+            metrics=metrics
+        )
     
     # Callbacks
     callbacks = [
@@ -548,40 +720,80 @@ def run_classification_experiment(X_train, X_val, X_test, y_train, y_val, y_test
     
     with mlflow.start_run(run_name=params['run_name']):
         # Log parameters
-        mlflow.log_params({
+        log_params = {
             'model_type': 'classification',
-            'hidden_layers': str(params['hidden_layers']),
-            'dropout_rate': params['dropout_rate'],
             'batch_size': params['batch_size'],
             'epochs': params['epochs'],
-            'input_dim': input_dim
-        })
+            'learning_rate': params.get('learning_rate', 0.001),
+            'input_dim': input_dim,
+            'sampling_technique': params.get('sampling_technique', 'none'),
+            'loss_function': params.get('loss_function', 'binary_crossentropy'),
+            'l2_regularization': params.get('l2_regularization', 0.0)
+        }
         
-        # Handle class imbalance
-        class_counts = np.bincount(y_train.astype(int))
-        print(f"Class distribution in training data: {class_counts}")
-        
-        # Check if we have both classes (fraud and non-fraud)
-        if len(class_counts) > 1 and class_counts[1] > 0:
-            class_weight = {0: 1.0, 1: class_counts[0] / class_counts[1]}
-        else:
-            # If only one class is present, use balanced weights
-            print("Warning: Only one class present in training data. Using balanced weights.")
-            class_weight = {0: 1.0}
+        # Log additional parameters for advanced sampling if used
+        if params.get('sampling_technique', 'none') != 'none':
+            log_params['sampling_ratio'] = params.get('sampling_ratio', 0.5)
+            log_params['k_neighbors'] = params.get('k_neighbors', 5)
             
-        mlflow.log_param('class_weight', str(class_weight))
+        # Log additional parameters for custom loss functions if used
+        if params.get('loss_function', 'binary_crossentropy') != 'binary_crossentropy':
+            log_params['focal_gamma'] = params.get('focal_gamma', 2.0)
+            log_params['focal_alpha'] = params.get('focal_alpha', 0.25)
+            
+        mlflow.log_params(log_params)
+        
+        # Set up class weights if not provided
+        if 'class_weight' not in params or params['class_weight'] is None:
+            # Calculate class weights based on class distribution
+            # This helps with imbalanced datasets (fraud detection)
+            class_counts = np.bincount(y_train.astype(int))
+            total_samples = len(y_train)
+            
+            # Check if class_weight_ratio is provided
+            if 'class_weight_ratio' in params and params['class_weight_ratio'] is not None:
+                # Use the specified ratio for positive class (fraud)
+                ratio = params['class_weight_ratio']
+                print(f"Using specified class weight ratio: {ratio}")
+                class_weights = {0: 1.0, 1: ratio}
+            else:
+                # Calculate balanced class weights
+                class_weights = {i: total_samples / (len(class_counts) * count) for i, count in enumerate(class_counts)}
+            
+            print(f"Using class weights: {class_weights}")
+        else:
+            class_weights = params.get('class_weight')
+            
+        mlflow.log_param('class_weight', str(class_weights))
         
         # Model path
         model_path = os.path.join(model_dir, f"{params['run_name']}_model.h5")
         
-        # Train model
+        # Get loss function parameters
+        loss_function = params.get('loss_function', 'binary_crossentropy')
+        focal_gamma = params.get('focal_gamma', 2.0)
+        focal_alpha = params.get('focal_alpha', 0.25)
+        
+        # Log loss function parameters
+        mlflow.log_param('loss_function', loss_function)
+        if loss_function != 'binary_crossentropy':
+            mlflow.log_param('focal_gamma', focal_gamma)
+            mlflow.log_param('focal_alpha', focal_alpha)
+        
+        # Train the model
         model, history = train_classification_model(
             X_train, y_train, X_val, y_val,
             input_dim=input_dim,
-            batch_size=params['batch_size'],
-            epochs=params['epochs'],
-            class_weight=class_weight,
-            model_path=model_path
+            hidden_layers=params.get('hidden_layers', [64, 32]),
+            learning_rate=params.get('learning_rate', 0.001),
+            batch_size=params.get('batch_size', 64),
+            epochs=params.get('epochs', 20),
+            class_weight=class_weights,
+            model_path=model_path,
+            loss_function=loss_function,
+            focal_gamma=focal_gamma,
+            focal_alpha=focal_alpha,
+            l2_regularization=params.get('l2_regularization', 0.0)
         )
         
         # Log training metrics
@@ -911,6 +1123,29 @@ def main():
     parser.add_argument('--experiment-name', type=str,
                         help='MLflow experiment name')
     
+    # Advanced sampling arguments
+    parser.add_argument('--sampling-technique', type=str, 
+                        choices=['none', 'smote', 'adasyn', 'borderline_smote'],
+                        help='Advanced sampling technique to use')
+    parser.add_argument('--sampling-ratio', type=float,
+                        help='Desired ratio of minority to majority class after sampling')
+    parser.add_argument('--k-neighbors', type=int,
+                        help='Number of nearest neighbors for sampling techniques')
+    
+    # Custom loss function arguments
+    parser.add_argument('--loss-function', type=str,
+                        choices=['binary_crossentropy', 'focal', 'weighted_focal', 
+                                 'asymmetric_focal', 'adaptive_focal'],
+                        help='Loss function to use')
+    parser.add_argument('--focal-gamma', type=float,
+                        help='Focusing parameter for focal loss')
+    parser.add_argument('--focal-alpha', type=float,
+                        help='Alpha parameter for focal loss')
+    parser.add_argument('--class-weight-ratio', type=float,
+                        help='Weight ratio for positive class (fraud) to negative class')
+    parser.add_argument('--l2-regularization', type=float,
+                        help='L2 regularization strength for model weights')
+    
     # GPU-specific arguments
     parser.add_argument('--disable-gpu', action='store_true',
                         help='Disable GPU usage even if available')
@@ -983,6 +1218,22 @@ def main():
     learning_rate = args.learning_rate or config.get('models.learning_rate', 0.001)
     dropout_rate = args.dropout_rate or classification_params.get('dropout_rate', 0.4)
     
+    # Advanced sampling parameters
+    sampling_technique = args.sampling_technique or 'none'
+    sampling_ratio = args.sampling_ratio or 0.5
+    k_neighbors = args.k_neighbors or 5
+    
+    # Custom loss function parameters
+    loss_function = args.loss_function or 'binary_crossentropy'
+    focal_gamma = args.focal_gamma or 2.0
+    focal_alpha = args.focal_alpha or 0.25
+    
+    # Class weighting parameters
+    class_weight_ratio = args.class_weight_ratio
+    
+    # Regularization parameters
+    l2_regularization = args.l2_regularization or 0.0
+    
     # MLflow settings
     mlflow_config = config.get_mlflow_config()
     use_mlflow = args.use_mlflow or config.get('mlflow.enabled', False)
@@ -990,7 +1241,13 @@ def main():
     experiment_name = args.experiment_name or mlflow_config.get('experiment_name', 'Fraud_Detection_Experiment')
     
     # Load and prepare data
-    X_train, X_val, X_test, y_train, y_val, y_test, feature_names, scaler = load_and_preprocess_data(data_path)
+    print(f"\nUsing sampling technique: {sampling_technique}")
+    X_train, X_val, X_test, y_train, y_val, y_test, feature_names, scaler = load_and_preprocess_data(
+        data_path, 
+        sampling_technique=sampling_technique,
+        sampling_ratio=sampling_ratio,
+        k_neighbors=k_neighbors
+    )
     input_dim = X_train.shape[1]
     
     # Run experiments
@@ -1004,7 +1261,14 @@ def main():
             'batch_size': batch_size,
             'epochs': epochs,
             'learning_rate': learning_rate,
+            'model_type': 'classification',
             'use_mlflow': use_mlflow,
+            'loss_function': loss_function,
+            'focal_gamma': focal_gamma,
+            'focal_alpha': focal_alpha,
+            'class_weight_ratio': class_weight_ratio,
+            'sampling_technique': sampling_technique,
+            'l2_regularization': l2_regularization,
             'mlflow_tracking_uri': mlflow_tracking_uri
         }
         

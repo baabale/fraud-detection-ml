@@ -3,16 +3,32 @@ PySpark script for loading and preprocessing banking transaction data for fraud 
 """
 import os
 import sys
-import time
-
+import argparse
+import logging
+import warnings
+import numpy as np
+import pandas as pd
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, log, hour, dayofweek, month, year, datediff, current_date, \
     when, lit, concat
 from pyspark.sql.types import TimestampType
 
+# Filter PySpark warnings to avoid excessive logging
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', message='.*jdk.incubator.*')
+warnings.filterwarnings('ignore', message='.*Your hostname.*')
+warnings.filterwarnings('ignore', message='.*Set SPARK_LOCAL_IP.*')
+warnings.filterwarnings('ignore', message='.*Unable to load native-hadoop.*')
+
 # Try to import TensorFlow for GPU detection
 try:
     import tensorflow as tf
+    import logging
+    
+    # Get a logger
+    gpu_logger = logging.getLogger('fraud_detection')
+    
     # Configure TensorFlow to use GPU if available
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
@@ -20,25 +36,28 @@ try:
             # Enable memory growth for all GPUs
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
-            print("\n" + "="*70)
-            print(f"🚀 GPU ACCELERATION ENABLED: Using {len(gpus)} GPU(s) for data processing")
-            print("="*70 + "\n")
+            
+            gpu_message = f"\n{'='*70}\n🚀 GPU ACCELERATION ENABLED: Using {len(gpus)} GPU(s) for data processing\n{'='*70}\n"
+            gpu_logger.info(gpu_message)
             
             # Test GPU performance
-            print("Testing GPU performance for data processing...")
+            gpu_logger.info("Testing GPU performance for data processing...")
             x = tf.random.normal([1000, 1000])
             start = time.time()
             tf.matmul(x, x)
-            print(f"Matrix multiplication took: {time.time() - start:.6f} seconds")
-            print(f"TensorFlow version: {tf.__version__}")
+            gpu_logger.info(f"Matrix multiplication took: {time.time() - start:.6f} seconds")
+            gpu_logger.info(f"TensorFlow version: {tf.__version__}")
         except RuntimeError as e:
-            print(f"Error configuring GPUs: {e}")
+            gpu_logger.error(f"Error configuring GPUs: {e}")
     else:
-        print("\n" + "="*70)
-        print("⚠️ NO GPU DETECTED: Using CPU for data processing (this will be slower)")
-        print("="*70 + "\n")
+        gpu_message = f"\n{'='*70}\n⚠️ NO GPU DETECTED: Using CPU for data processing (this will be slower)\n{'='*70}\n"
+        gpu_logger.warning(gpu_message)
 except ImportError:
-    print("TensorFlow not available. GPU acceleration not configured for data processing.")
+    # If we can't import tensorflow, we need to set up a basic logger
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger('fraud_detection')
+    logger.warning("TensorFlow not available. GPU acceleration not configured for data processing.")
 
 
 def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=None, multi_gpu=False, gpu_memory="2G"):
@@ -73,9 +92,11 @@ def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=N
     
     # Configure GPU acceleration if available
     if gpu_available:
-        print("\n" + "="*70)
-        print(f"🚀 CONFIGURING SPARK FOR GPU ACCELERATION")
-        print("="*70 + "\n")
+        # Get a logger
+        logger = logging.getLogger('fraud_detection')
+        
+        gpu_message = f"\n{'='*70}\n🚀 CONFIGURING SPARK FOR GPU ACCELERATION\n{'='*70}\n"
+        logger.info(gpu_message)
         
         # Enable GPU acceleration for Spark
         builder = builder.config("spark.rapids.sql.enabled", "true") \
@@ -89,7 +110,7 @@ def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=N
                 import tensorflow as tf
                 gpus = tf.config.list_physical_devices('GPU')
                 if len(gpus) > 1:
-                    print(f"Configuring Spark for {len(gpus)} GPUs...")
+                    logger.info(f"Configuring Spark for {len(gpus)} GPUs...")
                     # Set concurrent tasks based on GPU count
                     builder = builder.config("spark.rapids.sql.concurrentGpuTasks", str(len(gpus))) \
                                .config("spark.rapids.sql.explain", "ALL") \
@@ -207,11 +228,13 @@ def preprocess_data(df):
     Returns:
         DataFrame: Processed DataFrame ready for modeling
     """
-    # Data cleaning
-    print("Starting data preprocessing...")
+    # Get a logger
+    logger = logging.getLogger('fraud_detection')
     
-    # Print column names for debugging
-    print("Available columns:", df.columns)
+    logger.info("Starting data preprocessing...")
+    
+    # List available columns for debugging
+    logger.info(f"Available columns: {df.columns}")
     
     # Drop rows with null values in critical columns
     df = df.dropna(subset=["amount", "timestamp", "sender_account"])
@@ -221,7 +244,7 @@ def preprocess_data(df):
         df = df.withColumn("timestamp", col("timestamp").cast(TimestampType()))
     
     # Feature engineering
-    print("Performing feature engineering...")
+    logger.info("Performing feature engineering...")
     
     # Amount-based features
     df = df.withColumn("amount_log", log(col("amount") + 1))
@@ -232,6 +255,15 @@ def preprocess_data(df):
         df = df.withColumn("day_of_week", dayofweek(col("timestamp")))
         df = df.withColumn("month", month(col("timestamp")))
         df = df.withColumn("year", year(col("timestamp")))
+        
+        # Add cyclical time encoding for better pattern recognition
+        from pyspark.sql.functions import sin, cos, lit, radians
+        df = df.withColumn("hour_sin", sin(col("hour_of_day") * 2.0 * 3.14159 / 24))
+        df = df.withColumn("hour_cos", cos(col("hour_of_day") * 2.0 * 3.14159 / 24))
+        df = df.withColumn("day_sin", sin(col("day_of_week") * 2.0 * 3.14159 / 7))
+        df = df.withColumn("day_cos", cos(col("day_of_week") * 2.0 * 3.14159 / 7))
+        df = df.withColumn("month_sin", sin(col("month") * 2.0 * 3.14159 / 12))
+        df = df.withColumn("month_cos", cos(col("month") * 2.0 * 3.14159 / 12))
     
     # Fraud-related features
     if "is_fraud" in df.columns:
@@ -265,7 +297,46 @@ def preprocess_data(df):
                           .when(col("spending_deviation_score") > 0.5, "medium")
                           .otherwise("low"))
     
-    print(f"Preprocessing complete. Resulting dataframe has {df.count()} rows and {len(df.columns)} columns")
+    # Transaction sequence features - crucial for fraud detection patterns
+    if "sender_account" in df.columns and "timestamp" in df.columns and "amount" in df.columns:
+        from pyspark.sql import Window
+        from pyspark.sql.functions import lag, count, avg, stddev, sum, min, max
+        
+        # Define window for sequence features - transactions ordered by timestamp for each account
+        account_window = Window.partitionBy("sender_account").orderBy("timestamp")
+        
+        # Time between transactions (in seconds)
+        df = df.withColumn("time_since_prev_tx", 
+                          (col("timestamp").cast("long") - 
+                           lag(col("timestamp").cast("long"), 1).over(account_window))/60)
+        
+        # Amount change from previous transaction
+        df = df.withColumn("amount_delta", 
+                          col("amount") - lag(col("amount"), 1).over(account_window))
+        
+        df = df.withColumn("amount_ratio", 
+                           when(lag(col("amount"), 1).over(account_window) > 0, 
+                                col("amount") / lag(col("amount"), 1).over(account_window))
+                           .otherwise(lit(None)))
+        
+        # Rolling window for recent transaction patterns (last 5 transactions)
+        rolling_window_5 = Window.partitionBy("sender_account").orderBy("timestamp").rowsBetween(-5, -1)
+        
+        # Calculate rolling statistics on recent transactions
+        df = df.withColumn("avg_amount_last5", avg(col("amount")).over(rolling_window_5))
+        df = df.withColumn("max_amount_last5", max(col("amount")).over(rolling_window_5))
+        df = df.withColumn("tx_count_last5", count(col("amount")).over(rolling_window_5))
+        
+        # Deviation from recent transaction patterns
+        df = df.withColumn("amount_deviation_from_avg", 
+                          when(col("avg_amount_last5").isNotNull(), 
+                               (col("amount") - col("avg_amount_last5")) / col("avg_amount_last5"))
+                          .otherwise(0))
+        
+        # Transaction velocity features
+        df = df.withColumn("tx_velocity", col("tx_count_last5") / 5)
+    
+    logger.info(f"Preprocessing complete. Resulting dataframe has {df.count()} rows and {len(df.columns)} columns")
     return df
 
 def main():
@@ -274,6 +345,33 @@ def main():
     """
     import os
     import argparse
+    import logging
+    import sys
+    
+    # Configure logging for real-time output
+    # Create logs directory if it doesn't exist
+    os.makedirs('logs', exist_ok=True)
+    
+    # Get a logger specific to this module
+    logger = logging.getLogger('fraud_detection')
+    
+    # Only configure if not already configured
+    if not logger.handlers:
+        # Configure logging to avoid duplicate logs
+        logger.setLevel(logging.INFO)
+        
+        # Check if handlers already exist to prevent duplicates
+        file_handler = logging.FileHandler('logs/load_data.log')
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        logger.addHandler(file_handler)
+        
+        # Only add console handler if not already present
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        logger.addHandler(console_handler)
+    
+    # Force stdout to flush immediately
+    sys.stdout.reconfigure(line_buffering=True)
     
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Process transaction data for fraud detection')
@@ -295,7 +393,7 @@ def main():
     
     # Handle GPU configuration based on command-line arguments
     if args.disable_gpu:
-        print("GPU usage disabled by command line argument.")
+        logger.info("GPU usage disabled by command line argument.")
         try:
             import tensorflow as tf
             tf.config.set_visible_devices([], 'GPU')
@@ -334,30 +432,30 @@ def main():
     # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(processed_path), exist_ok=True)
     
-    print(f"Using input file: {raw_path}")
-    print(f"Using output path: {processed_path}")
+    logger.info(f"Using input file: {raw_path}")
+    logger.info(f"Using output path: {processed_path}")
     
     # Load and process data
     df_raw = load_data(spark, raw_path)
     
     # Print schema and sample data
-    print("Raw data schema:")
+    logger.info("Raw data schema:")
     df_raw.printSchema()
-    print("Sample data:")
+    logger.info("Sample data:")
     df_raw.show(5)
     
     # Preprocess data
     df_processed = preprocess_data(df_raw)
     
     # Print processed schema
-    print("Processed data schema:")
+    logger.info("Processed data schema:")
     df_processed.printSchema()
     
     # Save the processed data for modeling (as Parquet for efficiency)
-    print(f"Saving processed data to {processed_path}")
+    logger.info(f"Saving processed data to {processed_path}")
     df_processed.write.mode("overwrite").parquet(processed_path)
     
-    print("Data processing complete!")
+    logger.info("Data processing complete!")
     
     # Stop Spark session
     spark.stop()

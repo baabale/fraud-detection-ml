@@ -7,6 +7,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import sys
+import logging
+import warnings
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_curve, roc_auc_score, precision_recall_curve, average_precision_score,
@@ -16,6 +19,43 @@ import tensorflow as tf
 import mlflow
 import mlflow.tensorflow
 import json
+
+# Filter sklearn warnings to avoid excessive logging
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
+# Specifically filter out the precision warning that's causing most of the noise
+warnings.filterwarnings('ignore', message='Precision is ill-defined and being set to 0.0')
+# Filter TensorFlow deprecation warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+# Filter TensorFlow model saving format warnings
+warnings.filterwarnings('ignore', message='.*save_format.*is deprecated in Keras 3.*')
+warnings.filterwarnings('ignore', message='.*HDF5 file.*is considered legacy.*')
+# Filter optimizer variable mismatch warnings
+warnings.filterwarnings('ignore', message='.*Skipping variable loading for optimizer.*')
+# Filter absl warnings
+warnings.filterwarnings('ignore', module='absl')
+# Filter compiled metrics warnings
+warnings.filterwarnings('ignore', message='.*Compiled the loaded model, but the compiled metrics.*')
+
+# Configure logging for real-time output
+os.makedirs('logs', exist_ok=True)
+
+# Check if the root logger already has handlers to avoid duplicate logging
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('logs/evaluate_model.log'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+
+# Get a logger specific to this module
+logger = logging.getLogger('fraud_detection_evaluation')
+
+# Force stdout to flush immediately
+sys.stdout.reconfigure(line_buffering=True)
 
 # Configure TensorFlow to use GPU if available
 gpus = tf.config.list_physical_devices('GPU')
@@ -187,7 +227,7 @@ def load_test_data(file_path, model_path=None):
     print(f"Prepared test data with {X_test.shape[0]} samples and {X_test.shape[1]} features")
     return X_test, y_test
 
-def evaluate_classification_model(model, X_test, y_test, threshold=0.5):
+def evaluate_classification_model(model, X_test, y_test, threshold=0.5, avg_transaction_amount=500, cost_fp_ratio=0.1, cost_fn_ratio=1.0):
     """
     Evaluate a classification model and generate performance metrics and visualizations.
     
@@ -196,9 +236,12 @@ def evaluate_classification_model(model, X_test, y_test, threshold=0.5):
         X_test: Test features
         y_test: Test labels
         threshold: Classification threshold
+        avg_transaction_amount: Average transaction amount for cost calculation
+        cost_fp_ratio: Cost of false positive as ratio of transaction amount
+        cost_fn_ratio: Cost of false negative as ratio of transaction amount
         
     Returns:
-        dict: Dictionary of evaluation metrics
+        dict: Dictionary of evaluation metrics including financial impact
     """
     print("Evaluating classification model...")
     
@@ -235,6 +278,32 @@ def evaluate_classification_model(model, X_test, y_test, threshold=0.5):
             metrics['f1_score'] = f1_score(y_test, y_pred)
             metrics['auc'] = roc_auc_score(y_test, y_pred_proba)
             metrics['average_precision'] = average_precision_score(y_test, y_pred_proba)
+            
+            # Calculate confusion matrix for cost-sensitive metrics
+            tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+            
+            # Calculate financial costs
+            fp_cost = fp * avg_transaction_amount * cost_fp_ratio  # Cost of investigation
+            fn_cost = fn * avg_transaction_amount * cost_fn_ratio  # Cost of fraud loss
+            total_cost = fp_cost + fn_cost
+            
+            # Add cost-sensitive metrics
+            metrics['false_positives'] = int(fp)
+            metrics['false_negatives'] = int(fn)
+            metrics['true_positives'] = int(tp)
+            metrics['true_negatives'] = int(tn)
+            metrics['fp_cost'] = float(fp_cost)
+            metrics['fn_cost'] = float(fn_cost)
+            metrics['total_cost'] = float(total_cost)
+            metrics['cost_per_transaction'] = float(total_cost / len(y_test))
+            metrics['avg_transaction_amount'] = float(avg_transaction_amount)
+            
+            # Calculate cost savings compared to no model (all transactions legitimate)
+            no_model_cost = sum(y_test) * avg_transaction_amount * cost_fn_ratio
+            cost_savings = no_model_cost - total_cost
+            metrics['cost_savings'] = float(cost_savings)
+            metrics['cost_savings_percent'] = float((cost_savings / no_model_cost) * 100) if no_model_cost > 0 else 0.0
+            
         except Exception as e:
             print(f"Warning: Could not calculate some metrics: {str(e)}")
     else:
@@ -267,6 +336,10 @@ def evaluate_classification_model(model, X_test, y_test, threshold=0.5):
     if len(unique_classes) > 1:
         try:
             generate_classification_visualizations(y_test, y_pred, y_pred_proba)
+            
+            # Generate cost-sensitive visualizations
+            generate_cost_sensitive_visualizations(y_test, y_pred_proba, avg_transaction_amount, 
+                                                  cost_fp_ratio, cost_fn_ratio)
         except Exception as e:
             print(f"Warning: Could not generate visualizations: {str(e)}")
     
@@ -380,6 +453,119 @@ def generate_classification_visualizations(y_true, y_pred, y_pred_proba, output_
     
     print(f"Visualizations saved to {output_dir}")
 
+def generate_cost_sensitive_visualizations(y_true, y_pred_proba, avg_transaction_amount=500, 
+                                cost_fp_ratio=0.1, cost_fn_ratio=1.0, output_dir='../../results/figures'):
+    """
+    Generate cost-sensitive visualizations for fraud detection model evaluation.
+    
+    Args:
+        y_true: True labels
+        y_pred_proba: Predicted probabilities
+        avg_transaction_amount: Average transaction amount
+        cost_fp_ratio: Cost of false positive as ratio of transaction amount
+        cost_fn_ratio: Cost of false negative as ratio of transaction amount
+        output_dir: Directory to save figures
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Calculate costs at different thresholds
+    thresholds = np.linspace(0.01, 0.99, 99)
+    costs = []
+    fp_costs = []
+    fn_costs = []
+    f1_scores = []
+    recalls = []
+    precisions = []
+    
+    for threshold in thresholds:
+        y_pred = (y_pred_proba >= threshold).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+        
+        # Calculate costs
+        fp_cost = fp * avg_transaction_amount * cost_fp_ratio
+        fn_cost = fn * avg_transaction_amount * cost_fn_ratio
+        total_cost = fp_cost + fn_cost
+        
+        costs.append(total_cost)
+        fp_costs.append(fp_cost)
+        fn_costs.append(fn_cost)
+        
+        # Calculate performance metrics
+        f1 = f1_score(y_true, y_pred)
+        recall = recall_score(y_true, y_pred)
+        precision = precision_score(y_true, y_pred)
+        
+        f1_scores.append(f1)
+        recalls.append(recall)
+        precisions.append(precision)
+    
+    # Plot costs vs threshold
+    plt.figure(figsize=(10, 6))
+    plt.plot(thresholds, costs, label='Total Cost')
+    plt.plot(thresholds, fp_costs, label='False Positive Cost')
+    plt.plot(thresholds, fn_costs, label='False Negative Cost')
+    plt.xlabel('Threshold')
+    plt.ylabel('Cost ($)')
+    plt.title('Financial Impact vs. Classification Threshold')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, 'cost_vs_threshold.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Find optimal threshold based on cost
+    optimal_threshold_idx = np.argmin(costs)
+    optimal_threshold = thresholds[optimal_threshold_idx]
+    min_cost = costs[optimal_threshold_idx]
+    
+    # Plot metrics vs threshold with cost-optimal point highlighted
+    plt.figure(figsize=(10, 6))
+    plt.plot(thresholds, f1_scores, label='F1 Score')
+    plt.plot(thresholds, recalls, label='Recall')
+    plt.plot(thresholds, precisions, label='Precision')
+    plt.axvline(x=optimal_threshold, color='r', linestyle='--', label=f'Cost-optimal threshold: {optimal_threshold:.2f}')
+    plt.xlabel('Threshold')
+    plt.ylabel('Score')
+    plt.title('Performance Metrics vs. Threshold with Cost-Optimal Point')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, 'metrics_with_cost_optimal.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Calculate cost savings at different recall levels
+    recall_levels = np.linspace(0.5, 1.0, 11)
+    savings = []
+    thresholds_for_recall = []
+    
+    for target_recall in recall_levels:
+        # Find threshold that achieves target recall
+        recall_diffs = [abs(r - target_recall) for r in recalls]
+        closest_idx = np.argmin(recall_diffs)
+        threshold_for_recall = thresholds[closest_idx]
+        thresholds_for_recall.append(threshold_for_recall)
+        
+        # Calculate cost savings at this threshold
+        y_pred = (y_pred_proba >= threshold_for_recall).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+        
+        # Calculate costs
+        total_cost = (fp * avg_transaction_amount * cost_fp_ratio) + (fn * avg_transaction_amount * cost_fn_ratio)
+        no_model_cost = sum(y_true) * avg_transaction_amount * cost_fn_ratio
+        saving = no_model_cost - total_cost
+        savings.append(saving)
+    
+    # Plot cost savings vs recall
+    plt.figure(figsize=(10, 6))
+    plt.plot(recall_levels, savings)
+    plt.xlabel('Recall (Fraud Detection Rate)')
+    plt.ylabel('Cost Savings ($)')
+    plt.title('Cost Savings vs. Fraud Detection Rate')
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(output_dir, 'cost_savings_vs_recall.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Cost-sensitive visualizations saved to {output_dir}")
+    print(f"Cost-optimal threshold: {optimal_threshold:.4f} with minimum cost: ${min_cost:.2f}")
+
 def generate_autoencoder_visualizations(y_true, y_pred, anomaly_scores, threshold, output_dir='../../results/figures'):
     """
     Generate visualizations for autoencoder model evaluation.
@@ -463,9 +649,9 @@ def main():
     """
     Main function to run the model evaluation.
     """
-    parser = argparse.ArgumentParser(description='Evaluate fraud detection models')
+    parser = argparse.ArgumentParser(description='Evaluate a trained fraud detection model')
     parser.add_argument('--model-path', type=str, required=True,
-                        help='Path to the trained model')
+                        help='Path to the saved model')
     parser.add_argument('--test-data', type=str, required=True,
                         help='Path to the test data file')
     parser.add_argument('--model-type', type=str, choices=['classification', 'autoencoder'],
@@ -476,6 +662,14 @@ def main():
                         help='Percentile for threshold determination (autoencoder only)')
     parser.add_argument('--output-dir', type=str, default='../../results',
                         help='Directory to save evaluation results')
+    
+    # Add cost-sensitive evaluation parameters
+    parser.add_argument('--avg-transaction-amount', type=float, default=500,
+                        help='Average transaction amount for cost calculation')
+    parser.add_argument('--cost-fp-ratio', type=float, default=0.1,
+                        help='Cost of false positive as ratio of transaction amount (investigation cost)')
+    parser.add_argument('--cost-fn-ratio', type=float, default=1.0,
+                        help='Cost of false negative as ratio of transaction amount (fraud loss)')
     
     # Add GPU-related arguments to match the pipeline's parameters
     parser.add_argument('--disable-gpu', action='store_true',
@@ -497,7 +691,12 @@ def main():
     with mlflow.start_run(run_name=f"evaluate_{args.model_type}"):
         if args.model_type == 'classification':
             threshold = 0.5 if args.threshold is None else args.threshold
-            metrics = evaluate_classification_model(model, X_test, y_test, threshold)
+            metrics = evaluate_classification_model(
+                model, X_test, y_test, threshold,
+                avg_transaction_amount=args.avg_transaction_amount,
+                cost_fp_ratio=args.cost_fp_ratio,
+                cost_fn_ratio=args.cost_fn_ratio
+            )
             
             # Log metrics to MLflow
             for metric, value in metrics.items():
@@ -505,6 +704,11 @@ def main():
             
             # Save metrics to file
             save_metrics(metrics, args.model_type, os.path.join(args.output_dir, 'metrics'))
+            
+            # Log cost-related parameters
+            mlflow.log_param('avg_transaction_amount', args.avg_transaction_amount)
+            mlflow.log_param('cost_fp_ratio', args.cost_fp_ratio)
+            mlflow.log_param('cost_fn_ratio', args.cost_fn_ratio)
             
         elif args.model_type == 'autoencoder':
             try:
