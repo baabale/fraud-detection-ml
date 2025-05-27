@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added test script for API validation
 - Added GPU-related command-line arguments to deployment scripts
 - Added improved error handling and debugging in API server
+- Added GPU-related command-line arguments to streaming fraud detection script
 
 ### Fixed
 - Resolved NaN handling in model training and evaluation
@@ -22,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed GPU parameter handling in model deployment scripts
 - Fixed non-numeric column handling in model artifact saving
 - Added custom objects support for loading models with custom metrics
+- Fixed GPU parameter handling in streaming fraud detection script
 
 ## [1.0.0] - 2025-05-25
 
