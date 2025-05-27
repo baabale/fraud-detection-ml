@@ -12,25 +12,35 @@ url = "http://localhost:8080/predict"
 sample_data = {
     "transactions": [
         {
-            "amount": 1000.0,
-            "hour": 12,
-            "day": 3,
-            "spending_deviation_score": 0.5,
-            "geo_anomaly_score": 0.2,
-            "amount_log": 6.9,
+            "amount": 500.0,
+            "time_since_last_transaction": 3600,
+            "spending_deviation_score": 0.2,
+            "velocity_score": 0.3,
+            "geo_anomaly_score": 0.1,
+            "amount_log": 6.2,
+            "hour_of_day": 14,
+            "day_of_week": 3,
+            "month": 5,
+            "year": 2025,
+            "fraud_label": 0,
             "velocity_score_norm": 0.3
         },
         {
-            "amount": 10000.0,
-            "hour": 2,
-            "day": 6,
-            "spending_deviation_score": 2.5,
-            "geo_anomaly_score": 0.9,
-            "amount_log": 9.2,
+            "amount": 5000.0,
+            "time_since_last_transaction": 1200,
+            "spending_deviation_score": 1.5,
+            "velocity_score": 0.8,
+            "geo_anomaly_score": 0.7,
+            "amount_log": 8.5,
+            "hour_of_day": 2,
+            "day_of_week": 6,
+            "month": 5,
+            "year": 2025,
+            "fraud_label": 0,
             "velocity_score_norm": 0.8
         }
     ],
-    "model_type": "classification"  # Use classification model only
+    "model_type": "both"  # Use both classification and autoencoder models
 }
 
 # Send request

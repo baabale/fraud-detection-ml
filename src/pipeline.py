@@ -104,8 +104,8 @@ def run_data_processing(config):
     Returns:
         bool: True if successful, False otherwise
     """
-    # Override the raw data path to use the sample dataset for testing
-    raw_data_path = 'data/raw/sample_dataset.csv'  # Using sample dataset instead of config['data']['raw_path']
+    # Get data paths from config
+    raw_data_path = config['data']['raw_path']
     processed_data_path = config['data']['processed_path']
     
     # Ensure directories exist
@@ -143,6 +143,24 @@ def run_model_training(config, model_type):
         f"--experiment-name {config['mlflow']['experiment_name']} "
         f"--model-dir {model_dir}"
     )
+    
+    # Add GPU-specific parameters if configured
+    if 'gpu' in config and config['gpu']:
+        # Add single-GPU flag if multi-GPU is disabled
+        if 'multi_gpu' in config['gpu'] and not config['gpu']['multi_gpu']:
+            command += f" --single-gpu"
+        
+        # Add disable-gpu flag if specified
+        if 'disable_gpu' in config['gpu'] and config['gpu']['disable_gpu']:
+            command += f" --disable-gpu"
+        
+        # Add batch size multiplier for multi-GPU training if specified
+        if 'batch_size_multiplier' in config['gpu']:
+            command += f" --batch-size-multiplier {config['gpu']['batch_size_multiplier']}"
+        
+        # Add memory growth option if specified
+        if 'memory_growth' in config['gpu']:
+            command += f" --memory-growth"
     
     # Run command
     return_code = run_command(command, f"{model_type.capitalize()} Model Training")
@@ -185,6 +203,20 @@ def run_model_evaluation(config, model_type):
     if model_type == 'autoencoder' and 'percentile' in config['evaluation']:
         command += f" --percentile {config['evaluation']['percentile']}"
     
+    # Add GPU-specific parameters if configured
+    if 'gpu' in config and config['gpu']:
+        # Add single-GPU flag if multi-GPU is disabled
+        if 'multi_gpu' in config['gpu'] and not config['gpu']['multi_gpu']:
+            command += f" --single-gpu"
+        
+        # Add disable-gpu flag if specified
+        if 'disable_gpu' in config['gpu'] and config['gpu']['disable_gpu']:
+            command += f" --disable-gpu"
+        
+        # Add memory growth option if specified
+        if 'memory_growth' in config['gpu']:
+            command += f" --memory-growth"
+    
     # Run command
     return_code = run_command(command, f"{model_type.capitalize()} Model Evaluation")
     return return_code == 0
@@ -204,10 +236,52 @@ def main():
                         choices=['classification', 'autoencoder', 'both'],
                         default='both',
                         help='Type of model to train/evaluate')
+    
+    # GPU configuration arguments
+    parser.add_argument('--disable-gpu', action='store_true',
+                        help='Disable GPU usage even if available')
+    parser.add_argument('--single-gpu', action='store_true',
+                        help='Use only a single GPU even if multiple are available')
+    parser.add_argument('--batch-size-multiplier', type=int, default=2,
+                        help='Multiplier for batch size when using multiple GPUs')
+    parser.add_argument('--memory-growth', action='store_true',
+                        help='Enable memory growth for GPUs to prevent TensorFlow from allocating all memory')
+    
     args = parser.parse_args()
     
     # Load configuration
     config = load_config(args.config)
+    
+    # Add GPU configuration from command line arguments to config
+    if not 'gpu' in config:
+        config['gpu'] = {}
+    
+    # Set multi-GPU as the default, but allow override with single-GPU flag
+    if 'multi_gpu' not in config['gpu']:
+        config['gpu']['multi_gpu'] = True  # Use all GPUs by default
+        logger.info("Multi-GPU training enabled by default")
+    
+    # Override GPU settings with command line arguments if provided
+    if args.disable_gpu:
+        config['gpu']['disable_gpu'] = True
+        config['gpu']['multi_gpu'] = False  # Disable multi-GPU if GPU is disabled
+        logger.info("GPU usage disabled from command line")
+    elif args.single_gpu:
+        config['gpu']['multi_gpu'] = False
+        config['gpu']['disable_gpu'] = False
+        logger.info("Single-GPU mode enabled from command line")
+    else:
+        # Default to multi-GPU if neither disable-gpu nor single-gpu is specified
+        config['gpu']['multi_gpu'] = True
+        config['gpu']['disable_gpu'] = False
+    
+    if args.batch_size_multiplier:
+        config['gpu']['batch_size_multiplier'] = args.batch_size_multiplier
+        logger.info(f"Batch size multiplier set to {args.batch_size_multiplier} from command line")
+    
+    if args.memory_growth:
+        config['gpu']['memory_growth'] = True
+        logger.info("GPU memory growth enabled from command line")
     
     # Create timestamped run directory
     run_dir = create_timestamp_dir('runs')

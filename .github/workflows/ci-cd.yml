@@ -1,0 +1,76 @@
+name: Fraud Detection CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install pytest pytest-cov
+        
+    - name: Run tests
+      run: |
+        pytest --cov=src tests/
+        
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+      
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: |
+          ghcr.io/${{ github.repository }}/fraud-detection:latest
+          ghcr.io/${{ github.repository }}/fraud-detection:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Uncomment and configure this job when you're ready to deploy to production
+  # deploy:
+  #   needs: build
+  #   if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+  #   runs-on: ubuntu-latest
+  #   
+  #   steps:
+  #   - name: Deploy to production
+  #     uses: appleboy/ssh-action@master
+  #     with:
+  #       host: ${{ secrets.DEPLOY_HOST }}
+  #       username: ${{ secrets.DEPLOY_USERNAME }}
+  #       key: ${{ secrets.DEPLOY_KEY }}
+  #       script: |
+  #         cd /path/to/deployment
+  #         docker-compose pull
+  #         docker-compose up -d

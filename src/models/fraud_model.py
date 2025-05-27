@@ -7,6 +7,19 @@ from tensorflow.keras import layers, models, callbacks
 import numpy as np
 import os
 
+# Check for GPU availability
+def check_gpu():
+    """Check if GPU is available and print device information."""
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        print(f"GPU(s) detected: {len(gpus)}")
+        for gpu in gpus:
+            print(f" - {gpu}")
+        return True
+    else:
+        print("No GPU detected. Using CPU for model training.")
+        return False
+
 def create_classification_model(input_dim, hidden_layers=[64, 32], dropout_rate=0.4):
     """
     Create a feedforward neural network for binary fraud classification.
@@ -199,8 +212,10 @@ def compute_anomaly_scores(model, X):
     return mse
 
 if __name__ == "__main__":
+    # Check for GPU availability
+    has_gpu = check_gpu()
+    
     # Placeholder for loading preprocessed data and training the model
     # X_train, y_train = ...
     # model = create_classification_model(input_dim=X_train.shape[1])
     # model.fit(X_train, y_train, epochs=10, batch_size=256, validation_split=0.2)
-    pass

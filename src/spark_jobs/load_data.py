@@ -1,26 +1,117 @@
 """
 PySpark script for loading and preprocessing banking transaction data for fraud detection.
 """
+import os
+import sys
+import time
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, log, hour, dayofweek, month, year, datediff, current_date, \
     when, lit, concat
 from pyspark.sql.types import TimestampType
 
-def create_spark_session(app_name="FraudDetectionPreprocessing"):
+# Try to import TensorFlow for GPU detection
+try:
+    import tensorflow as tf
+    # Configure TensorFlow to use GPU if available
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Enable memory growth for all GPUs
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print("\n" + "="*70)
+            print(f"🚀 GPU ACCELERATION ENABLED: Using {len(gpus)} GPU(s) for data processing")
+            print("="*70 + "\n")
+            
+            # Test GPU performance
+            print("Testing GPU performance for data processing...")
+            x = tf.random.normal([1000, 1000])
+            start = time.time()
+            tf.matmul(x, x)
+            print(f"Matrix multiplication took: {time.time() - start:.6f} seconds")
+            print(f"TensorFlow version: {tf.__version__}")
+        except RuntimeError as e:
+            print(f"Error configuring GPUs: {e}")
+    else:
+        print("\n" + "="*70)
+        print("⚠️ NO GPU DETECTED: Using CPU for data processing (this will be slower)")
+        print("="*70 + "\n")
+except ImportError:
+    print("TensorFlow not available. GPU acceleration not configured for data processing.")
+
+
+def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=None, multi_gpu=False, gpu_memory="2G"):
     """
     Create and return a Spark session.
     
     Args:
         app_name (str): Name of the Spark application
+        gpu_available (bool, optional): Whether GPU is available. If None, will be auto-detected.
+        multi_gpu (bool): Whether to configure for multiple GPUs
+        gpu_memory (str): Amount of GPU memory to allocate (e.g., "2G")
         
     Returns:
         SparkSession: Configured Spark session
     """
-    return SparkSession.builder \
-        .appName(app_name) \
-        .config("spark.driver.memory", "4g") \
-        .config("spark.executor.memory", "4g") \
-        .getOrCreate()
+    # Auto-detect GPU availability if not explicitly provided
+    if gpu_available is None:
+        gpu_available = False
+        try:
+            import tensorflow as tf
+            gpus = tf.config.list_physical_devices('GPU')
+            gpu_available = len(gpus) > 0
+        except ImportError:
+            pass
+    
+    # Start building the Spark session
+    builder = SparkSession.builder.appName(app_name)
+    
+    # Configure memory
+    builder = builder.config("spark.driver.memory", "4g") \
+                   .config("spark.executor.memory", "4g")
+    
+    # Configure GPU acceleration if available
+    if gpu_available:
+        print("\n" + "="*70)
+        print(f"🚀 CONFIGURING SPARK FOR GPU ACCELERATION")
+        print("="*70 + "\n")
+        
+        # Enable GPU acceleration for Spark
+        builder = builder.config("spark.rapids.sql.enabled", "true") \
+                       .config("spark.rapids.memory.pinnedPool.size", gpu_memory) \
+                       .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+                       .config("spark.sql.execution.arrow.maxRecordsPerBatch", "500000")
+        
+        # Configure for multi-GPU if requested and available
+        if multi_gpu:
+            try:
+                import tensorflow as tf
+                gpus = tf.config.list_physical_devices('GPU')
+                if len(gpus) > 1:
+                    print(f"Configuring Spark for {len(gpus)} GPUs...")
+                    # Set concurrent tasks based on GPU count
+                    builder = builder.config("spark.rapids.sql.concurrentGpuTasks", str(len(gpus))) \
+                               .config("spark.rapids.sql.explain", "ALL") \
+                               .config("spark.rapids.memory.gpu.pooling.enabled", "true") \
+                               .config("spark.rapids.sql.multiThreadedRead.numThreads", str(len(gpus) * 2))
+                else:
+                    print("Only one GPU detected. Using single-GPU configuration.")
+                    builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2") \
+                               .config("spark.rapids.sql.explain", "ALL")
+            except ImportError:
+                # Fall back to default GPU settings if TensorFlow is not available
+                builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2") \
+                           .config("spark.rapids.sql.explain", "ALL")
+        else:
+            # Single GPU configuration
+            builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2") \
+                           .config("spark.rapids.sql.explain", "ALL")
+    else:
+        print("Using CPU-only configuration for Spark")
+    
+    # Create and return the session
+    return builder.getOrCreate()
 
 def load_data(spark, file_path):
     """
@@ -186,14 +277,54 @@ def main():
     
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Process transaction data for fraud detection')
-    parser.add_argument('--input', type=str, default='data/raw/sample_dataset.csv',  # CHANGED: Using sample dataset
+    parser.add_argument('--input', type=str, default='data/raw/sample_dataset.csv',
                         help='Path to the input CSV file')
     parser.add_argument('--output', type=str, default='data/processed/transactions.parquet',
                         help='Path to save the processed Parquet file')
+    
+    # GPU configuration arguments
+    parser.add_argument('--disable-gpu', action='store_true',
+                        help='Disable GPU usage even if available')
+    parser.add_argument('--single-gpu', action='store_true',
+                        help='Use only a single GPU even if multiple are available')
+    parser.add_argument('--memory-growth', action='store_true', default=True,
+                        help='Enable memory growth for GPUs to prevent TensorFlow from allocating all memory')
+    parser.add_argument('--gpu-memory', type=str, default='2G',
+                        help='Amount of GPU memory to allocate for Spark operations (e.g. 2G, 4G)')
     args = parser.parse_args()
     
-    # Initialize Spark
-    spark = create_spark_session()
+    # Handle GPU configuration based on command-line arguments
+    if args.disable_gpu:
+        print("GPU usage disabled by command line argument.")
+        try:
+            import tensorflow as tf
+            tf.config.set_visible_devices([], 'GPU')
+        except ImportError:
+            pass
+        gpu_available = False
+    else:
+        # Check GPU availability
+        gpu_available = False
+        try:
+            import tensorflow as tf
+            gpus = tf.config.list_physical_devices('GPU')
+            gpu_available = len(gpus) > 0 and not args.disable_gpu
+            
+            # Configure memory growth if requested
+            if args.memory_growth and gpus:
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+        except ImportError:
+            pass
+    
+    # Initialize Spark with appropriate GPU configuration
+    # Use multi-GPU by default unless single-GPU is specified
+    use_multi_gpu = not args.single_gpu
+    
+    # Initialize Spark with appropriate GPU configuration
+    spark = create_spark_session(gpu_available=gpu_available, 
+                               multi_gpu=use_multi_gpu,
+                               gpu_memory=args.gpu_memory)
     
     # Get absolute paths
     current_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

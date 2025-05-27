@@ -12,11 +12,107 @@ import seaborn as sns
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, precision_recall_curve
+
+# Parse command-line arguments before importing TensorFlow
+# This allows us to configure GPU settings before any TensorFlow operations
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train fraud detection models')
+    parser.add_argument('--data-path', type=str,
+                        help='Path to processed data')
+    parser.add_argument('--model-dir', type=str,
+                        help='Directory to save model artifacts')
+    parser.add_argument('--run-name', type=str,
+                        help='Name for the training run')
+    parser.add_argument('--model-type', type=str, choices=['classification', 'autoencoder', 'both'],
+                        help='Type of model to train')
+    parser.add_argument('--batch-size', type=int,
+                        help='Batch size for training')
+    parser.add_argument('--epochs', type=int,
+                        help='Number of epochs for training')
+    parser.add_argument('--learning-rate', type=float,
+                        help='Learning rate for optimizer')
+    parser.add_argument('--dropout-rate', type=float,
+                        help='Dropout rate for regularization')
+    parser.add_argument('--use-mlflow', action='store_true',
+                        help='Whether to use MLflow for tracking')
+    parser.add_argument('--mlflow-tracking-uri', type=str,
+                        help='MLflow tracking server URI')
+    parser.add_argument('--experiment-name', type=str,
+                        help='MLflow experiment name')
+    
+    # GPU-specific arguments
+    parser.add_argument('--disable-gpu', action='store_true',
+                        help='Disable GPU usage even if available')
+    parser.add_argument('--single-gpu', action='store_true',
+                        help='Use only a single GPU even if multiple are available')
+    parser.add_argument('--batch-size-multiplier', type=int, default=2,
+                        help='Multiplier for batch size when using multiple GPUs')
+    parser.add_argument('--memory-growth', type=str, choices=['true', 'false'], default='true',
+                        help='Enable memory growth for GPUs to prevent TensorFlow from allocating all memory')
+    
+    return parser.parse_args()
+
+# Parse arguments before importing TensorFlow
+args = parse_args()
+
+# Now import TensorFlow and configure GPU settings based on arguments
 import tensorflow as tf
+
+# Configure GPU settings based on command-line arguments
+strategy = None
+if args.disable_gpu:
+    print("GPU usage disabled by command line argument.")
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Hide all GPUs
+else:
+    # Check GPU availability and configure based on arguments
+    gpus = tf.config.list_physical_devices('GPU')
+    
+    if gpus:
+        try:
+            # Configure memory growth if requested
+            if args.memory_growth == 'true':
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                print("GPU memory growth enabled.")
+            
+            print("\n" + "="*70)
+            print(f"🚀 GPU ACCELERATION ENABLED: Using {len(gpus)} GPU(s) for training")
+            print("="*70 + "\n")
+            
+            # Test GPU performance
+            import time
+            print("Testing GPU performance...")
+            x = tf.random.normal([1000, 1000])
+            start = time.time()
+            tf.matmul(x, x)
+            print(f"Matrix multiplication took: {time.time() - start:.6f} seconds")
+            print(f"TensorFlow version: {tf.__version__}")
+            
+            # Configure multi-GPU strategy if multiple GPUs are available and not disabled
+            if len(gpus) > 1 and not args.single_gpu:
+                print("\n" + "="*70)
+                print(f"🚀 MULTI-GPU TRAINING ENABLED: Distributing across {len(gpus)} GPUs")
+                print("="*70 + "\n")
+                # Create a MirroredStrategy for multi-GPU training
+                strategy = tf.distribute.MirroredStrategy()
+                print(f"Number of devices: {strategy.num_replicas_in_sync}")
+            else:
+                if args.single_gpu:
+                    print("Single GPU mode enabled by command line argument.")
+                else:
+                    print("Single GPU detected. Using default strategy.")
+        except RuntimeError as e:
+            print(f"Error configuring GPUs: {e}")
+    else:
+        print("\n" + "="*70)
+        print("⚠️ NO GPU DETECTED: Using CPU for training (this will be slower)")
+        print("="*70 + "\n")
+
 from tensorflow.keras.models import Sequential, Model
 from tensorflow.keras.layers import Dense, Dropout, Input
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.metrics import AUC
 import mlflow
 import mlflow.tensorflow
 import joblib
@@ -30,31 +126,52 @@ if project_root not in sys.path:
 # Import the configuration manager
 from src.utils.config_manager import config
 
-def load_data(data_path=None):
+def load_and_preprocess_data(data_path, test_size=0.2, val_size=0.25, random_state=42):
     """
-    Load and prepare data for model training.
+    Load and preprocess data for model training.
     
     Args:
-        data_path (str, optional): Path to the processed data file. If None, uses the path from config.
+        data_path (str): Path to the processed data file
+        test_size (float): Proportion of data to use for testing
+        val_size (float): Proportion of training data to use for validation
+        random_state (int): Random seed for reproducibility
         
     Returns:
         tuple: X_train, X_val, X_test, y_train, y_val, y_test, feature_names, scaler
     """
-    # Use configuration if path not provided
-    if data_path is None:
-        data_path = config.get_data_path('processed_path')
-        
+    # Check if we're using multi-GPU
+    using_multi_gpu = 'strategy' in globals() and strategy is not None
+    
+    # Load data with optimized settings
     print(f"Loading data from {data_path}")
-    # For Parquet files
     if data_path.endswith('.parquet'):
-        df = pd.read_parquet(data_path)
-    # For CSV files
+        # Use parallel reading for Parquet files
+        import pyarrow.parquet as pq
+        if using_multi_gpu:
+            # Use multiple CPU threads for data loading to match GPU count
+            num_gpus = strategy.num_replicas_in_sync if hasattr(strategy, 'num_replicas_in_sync') else 1
+            num_threads = max(4, num_gpus * 2)  # Use at least 2 threads per GPU
+            print(f"Using {num_threads} parallel threads for data loading")
+            df = pq.read_table(data_path, use_threads=True, 
+                              memory_map=True).to_pandas()
+        else:
+            df = pd.read_parquet(data_path)
     elif data_path.endswith('.csv'):
-        df = pd.read_csv(data_path)
+        if using_multi_gpu:
+            # Use chunked reading for large CSV files
+            num_gpus = strategy.num_replicas_in_sync if hasattr(strategy, 'num_replicas_in_sync') else 1
+            chunksize = 1000000 // num_gpus  # Adjust chunk size based on GPU count
+            print(f"Using chunked reading with size {chunksize} for CSV data")
+            chunks = []
+            for chunk in pd.read_csv(data_path, chunksize=chunksize):
+                chunks.append(chunk)
+            df = pd.concat(chunks, ignore_index=True)
+        else:
+            df = pd.read_csv(data_path)
     else:
         raise ValueError(f"Unsupported file format: {data_path}")
     
-    print(f"Loaded {len(df)} transactions from {data_path}")
+    print(f"Loaded dataset with {df.shape[0]} rows and {df.shape[1]} columns")
     
     # Print column types for debugging
     print("Column dtypes:")
@@ -294,51 +411,67 @@ def evaluate_autoencoder_model(model, X_test, y_test, threshold=None):
     
     return metrics, anomaly_scores
 
-def train_classification_model(X_train, y_train, X_val, y_val, input_dim, batch_size=256, 
-                           epochs=20, learning_rate=0.001, dropout_rate=0.4, 
-                           hidden_layers=None, class_weight=None, model_path=None):
+def train_classification_model(X_train, y_train, X_val, y_val, input_dim, hidden_layers=[64, 32], learning_rate=0.001, batch_size=64, epochs=50, class_weight=None, model_path=None):
     """
     Train a classification model for fraud detection.
     
     Args:
-        X_train: Training features
-        y_train: Training labels
-        X_val: Validation features
-        y_val: Validation labels
-        input_dim: Input dimension
-        batch_size: Batch size for training
-        epochs: Number of epochs
-        learning_rate: Learning rate for optimizer
-        dropout_rate: Dropout rate for regularization
-        hidden_layers: List of hidden layer sizes
-        class_weight: Class weights for imbalanced data
-        model_path: Path to save the model
+        X_train (array): Training features
+        y_train (array): Training labels
+        X_val (array): Validation features
+        y_val (array): Validation labels
+        input_dim (int): Input dimension
+        hidden_layers (list): List of hidden layer sizes
+        learning_rate (float): Learning rate for optimizer
+        batch_size (int): Batch size for training
+        epochs (int): Number of training epochs
+        class_weights (dict): Class weights for imbalanced data
         
     Returns:
-        tuple: Trained model and training history
+        model: Trained classification model
     """
-    # Set default hidden layers if not provided
-    if hidden_layers is None:
-        hidden_layers = [64, 32]
-    
-    # Build model
-    model = Sequential()
-    
-    # Input layer
-    model.add(Dense(hidden_layers[0], activation='relu', input_dim=input_dim))
-    model.add(Dropout(dropout_rate))
-    
-    # Hidden layers
-    for units in hidden_layers[1:]:
-        model.add(Dense(units, activation='relu'))
-        model.add(Dropout(dropout_rate))
-    
-    # Output layer
-    model.add(Dense(1, activation='sigmoid'))
-    
-    # Compile model
-    optimizer = Adam(learning_rate=learning_rate)
-    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+    # Use multi-GPU strategy if available
+    if 'strategy' in globals() and strategy is not None:
+        print(f"Creating classification model with multi-GPU strategy")
+        with strategy.scope():
+            # Create model
+            input_layer = Input(shape=(input_dim,))
+            x = Dense(hidden_layers[0], activation='relu')(input_layer)
+            
+            # Add hidden layers
+            for units in hidden_layers[1:]:
+                x = Dense(units, activation='relu')(x)
+                x = Dropout(0.2)(x)
+            
+            # Output layer
+            output_layer = Dense(1, activation='sigmoid')(x)
+            
+            # Create model
+            model = Model(inputs=input_layer, outputs=output_layer)
+            
+            # Compile model
+            optimizer = Adam(learning_rate=learning_rate)
+            model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy', AUC()])
+    else:
+        # Single-GPU or CPU model creation
+        # Create model
+        input_layer = Input(shape=(input_dim,))
+        x = Dense(hidden_layers[0], activation='relu')(input_layer)
+        
+        # Add hidden layers
+        for units in hidden_layers[1:]:
+            x = Dense(units, activation='relu')(x)
+            x = Dropout(0.2)(x)
+        
+        # Output layer
+        output_layer = Dense(1, activation='sigmoid')(x)
+        
+        # Create model
+        model = Model(inputs=input_layer, outputs=output_layer)
+        
+        # Compile model
+        optimizer = Adam(learning_rate=learning_rate)
+        model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy', AUC()])
     
     # Callbacks
     callbacks = [
@@ -349,16 +482,44 @@ def train_classification_model(X_train, y_train, X_val, y_val, input_dim, batch_
     if model_path:
         callbacks.append(ModelCheckpoint(model_path, save_best_only=True))
     
-    # Train model
-    history = model.fit(
-        X_train, y_train,
-        validation_data=(X_val, y_val),
-        epochs=epochs,
-        batch_size=batch_size,
-        class_weight=class_weight,
-        callbacks=callbacks,
-        verbose=1
-    )
+    # Create optimized TensorFlow datasets for training
+    if 'strategy' in globals() and strategy is not None and hasattr(strategy, 'num_replicas_in_sync'):
+        # Optimize batch size for multi-GPU training
+        # Increase batch size proportionally to the number of GPUs
+        effective_batch_size = batch_size * strategy.num_replicas_in_sync
+        print(f"Using effective batch size of {effective_batch_size} for {strategy.num_replicas_in_sync} GPUs")
+        
+        # Create TensorFlow datasets with prefetching and caching
+        train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+        train_dataset = train_dataset.cache()
+        train_dataset = train_dataset.shuffle(buffer_size=10000)
+        train_dataset = train_dataset.batch(effective_batch_size)
+        train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+        
+        val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val))
+        val_dataset = val_dataset.batch(effective_batch_size)
+        val_dataset = val_dataset.prefetch(tf.data.AUTOTUNE)
+        
+        # Train model with optimized datasets
+        history = model.fit(
+            train_dataset,
+            validation_data=val_dataset,
+            epochs=epochs,
+            callbacks=callbacks,
+            class_weight=class_weight,
+            verbose=1
+        )
+    else:
+        # Standard training for single GPU
+        history = model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=callbacks,
+            class_weight=class_weight,
+            verbose=1
+        )
     
     return model, history
 
@@ -453,13 +614,19 @@ def run_classification_experiment(X_train, X_val, X_test, y_train, y_val, y_test
         # Generate a sample input for signature
         signature = infer_signature(X_test[:1], model.predict(X_test[:1]))
 
-        # Log model with signature and sample input
-        mlflow.tensorflow.log_model(
-            model, 
-            "classification_model",
-            signature=signature,
-            input_example=X_test[:1]
-        )
+        # Save model with proper file extension before logging to MLflow
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model_path = os.path.join(tmp_dir, "model.keras")
+            model.save(model_path, save_format="keras")
+            
+            # Log model with signature and sample input
+            mlflow.tensorflow.log_model(
+                model, 
+                "classification_model",
+                signature=signature,
+                input_example=X_test[:1]
+            )
 
         # Log feature names
         mlflow.log_dict(feature_names, "feature_names.json")
@@ -490,33 +657,66 @@ def train_autoencoder_model(X_train, X_val, input_dim, batch_size=256, epochs=20
     if hidden_layers is None:
         hidden_layers = [64, 32]
     
-    # Build encoder
-    input_layer = Input(shape=(input_dim,))
-    encoded = Dense(hidden_layers[0], activation='relu')(input_layer)
-    
-    # Add encoding layers
-    for units in hidden_layers[1:]:
-        encoded = Dense(units, activation='relu')(encoded)
-    
-    # Bottleneck layer
-    bottleneck = Dense(encoding_dim, activation='relu')(encoded)
-    
-    # Build decoder (mirror of encoder)
-    decoded = Dense(hidden_layers[-1], activation='relu')(bottleneck)
-    
-    # Add decoding layers
-    for units in reversed(hidden_layers[:-1]):
-        decoded = Dense(units, activation='relu')(decoded)
-    
-    # Output layer
-    output_layer = Dense(input_dim, activation='linear')(decoded)
-    
-    # Create model
-    model = Model(inputs=input_layer, outputs=output_layer)
-    
-    # Compile model
-    optimizer = Adam(learning_rate=learning_rate)
-    model.compile(optimizer=optimizer, loss='mse')
+    # Use multi-GPU strategy if available
+    if 'strategy' in globals() and strategy is not None:
+        print(f"Creating autoencoder model with multi-GPU strategy")
+        with strategy.scope():
+            # Build encoder
+            input_layer = Input(shape=(input_dim,))
+            encoded = Dense(hidden_layers[0], activation='relu')(input_layer)
+            
+            # Add encoding layers
+            for units in hidden_layers[1:]:
+                encoded = Dense(units, activation='relu')(encoded)
+            
+            # Bottleneck layer
+            bottleneck = Dense(encoding_dim, activation='relu')(encoded)
+            
+            # Build decoder (mirror of encoder)
+            decoded = Dense(hidden_layers[-1], activation='relu')(bottleneck)
+            
+            # Add decoding layers
+            for units in reversed(hidden_layers[:-1]):
+                decoded = Dense(units, activation='relu')(decoded)
+            
+            # Output layer
+            output_layer = Dense(input_dim, activation='linear')(decoded)
+            
+            # Create model
+            model = Model(inputs=input_layer, outputs=output_layer)
+            
+            # Compile model
+            optimizer = Adam(learning_rate=learning_rate)
+            model.compile(optimizer=optimizer, loss='mse')
+    else:
+        # Single-GPU or CPU model creation
+        # Build encoder
+        input_layer = Input(shape=(input_dim,))
+        encoded = Dense(hidden_layers[0], activation='relu')(input_layer)
+        
+        # Add encoding layers
+        for units in hidden_layers[1:]:
+            encoded = Dense(units, activation='relu')(encoded)
+        
+        # Bottleneck layer
+        bottleneck = Dense(encoding_dim, activation='relu')(encoded)
+        
+        # Build decoder (mirror of encoder)
+        decoded = Dense(hidden_layers[-1], activation='relu')(bottleneck)
+        
+        # Add decoding layers
+        for units in reversed(hidden_layers[:-1]):
+            decoded = Dense(units, activation='relu')(decoded)
+        
+        # Output layer
+        output_layer = Dense(input_dim, activation='linear')(decoded)
+        
+        # Create model
+        model = Model(inputs=input_layer, outputs=output_layer)
+        
+        # Compile model
+        optimizer = Adam(learning_rate=learning_rate)
+        model.compile(optimizer=optimizer, loss='mse')
     
     # Callbacks
     callbacks = [
@@ -527,15 +727,42 @@ def train_autoencoder_model(X_train, X_val, input_dim, batch_size=256, epochs=20
     if model_path:
         callbacks.append(ModelCheckpoint(model_path, save_best_only=True))
     
-    # Train model
-    history = model.fit(
-        X_train, X_train,  # Autoencoder trains to reconstruct input
-        validation_data=(X_val, X_val),
-        epochs=epochs,
-        batch_size=batch_size,
-        callbacks=callbacks,
-        verbose=1
-    )
+    # Create optimized TensorFlow datasets for training
+    if 'strategy' in globals() and strategy is not None and hasattr(strategy, 'num_replicas_in_sync'):
+        # Optimize batch size for multi-GPU training
+        # Increase batch size proportionally to the number of GPUs
+        effective_batch_size = batch_size * strategy.num_replicas_in_sync
+        print(f"Using effective batch size of {effective_batch_size} for {strategy.num_replicas_in_sync} GPUs")
+        
+        # Create TensorFlow datasets with prefetching and caching
+        train_dataset = tf.data.Dataset.from_tensor_slices((X_train, X_train))  # Autoencoder trains to reconstruct input
+        train_dataset = train_dataset.cache()
+        train_dataset = train_dataset.shuffle(buffer_size=10000)
+        train_dataset = train_dataset.batch(effective_batch_size)
+        train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+        
+        val_dataset = tf.data.Dataset.from_tensor_slices((X_val, X_val))  # Same for validation
+        val_dataset = val_dataset.batch(effective_batch_size)
+        val_dataset = val_dataset.prefetch(tf.data.AUTOTUNE)
+        
+        # Train model with optimized datasets
+        history = model.fit(
+            train_dataset,
+            validation_data=val_dataset,
+            epochs=epochs,
+            callbacks=callbacks,
+            verbose=1
+        )
+    else:
+        # Standard training for single GPU
+        history = model.fit(
+            X_train, X_train,  # Autoencoder trains to reconstruct input
+            validation_data=(X_val, X_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=callbacks,
+            verbose=1
+        )
     
     return model, history
 
@@ -631,17 +858,23 @@ def run_autoencoder_experiment(X_train, X_val, X_test, y_train, y_val, y_test,
         # Log model
         # Create model signature
         from mlflow.models.signature import infer_signature
-
+        
         # Generate a sample input for signature
         signature = infer_signature(X_test[:1], model.predict(X_test[:1]))
-
-        # Log model with signature and sample input
-        mlflow.tensorflow.log_model(
-            model, 
-            "autoencoder_model",
-            signature=signature,
-            input_example=X_test[:1]
-        )
+        
+        # Save model with proper file extension before logging to MLflow
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model_path = os.path.join(tmp_dir, "model.keras")
+            model.save(model_path, save_format="keras")
+            
+            # Log model with signature and sample input
+            mlflow.tensorflow.log_model(
+                model, 
+                "autoencoder_model",
+                signature=signature,
+                input_example=X_test[:1]
+            )
 
         # Log feature names
         mlflow.log_dict(feature_names, "feature_names.json")
@@ -652,9 +885,8 @@ def run_autoencoder_experiment(X_train, X_val, X_test, y_train, y_val, y_test,
         return model, metrics
 
 def main():
-    """
-    Main function to train fraud detection models.
-    """
+    """Main function to train fraud detection models."""
+    # Handle GPU configuration based on command-line arguments
     parser = argparse.ArgumentParser(description='Train fraud detection models')
     parser.add_argument('--data-path', type=str,
                         help='Path to processed data')
@@ -678,7 +910,63 @@ def main():
                         help='MLflow tracking server URI')
     parser.add_argument('--experiment-name', type=str,
                         help='MLflow experiment name')
+    
+    # GPU-specific arguments
+    parser.add_argument('--disable-gpu', action='store_true',
+                        help='Disable GPU usage even if available')
+    parser.add_argument('--single-gpu', action='store_true',
+                        help='Use only a single GPU even if multiple are available')
+    parser.add_argument('--batch-size-multiplier', type=int, default=2,
+                        help='Multiplier for batch size when using multiple GPUs')
+    parser.add_argument('--memory-growth', type=str, choices=['true', 'false'], default='true',
+                        help='Enable memory growth for GPUs to prevent TensorFlow from allocating all memory')
+    
     args = parser.parse_args()
+    
+    if args.disable_gpu:
+        print("GPU usage disabled by command line argument.")
+        tf.config.set_visible_devices([], 'GPU')
+        strategy = None
+    else:
+        # Check GPU availability and configure based on arguments
+        gpus = tf.config.list_physical_devices('GPU')
+        
+        # Configure memory growth if requested
+        if args.memory_growth == 'true' and gpus:
+            try:
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                print("GPU memory growth enabled.")
+            except RuntimeError as e:
+                print(f"Error configuring GPU memory growth: {e}")
+        
+        # Configure multi-GPU strategy by default if multiple GPUs are available
+        # Only use single GPU if explicitly requested
+        if len(gpus) > 1 and not args.single_gpu:
+            try:
+                print(f"\n" + "="*70)
+                print(f"🚀 MULTI-GPU TRAINING ENABLED: Distributing across {len(gpus)} GPUs")
+                print("="*70 + "\n")
+                
+                # Create a MirroredStrategy for multi-GPU training
+                strategy = tf.distribute.MirroredStrategy()
+                print(f"Number of devices in sync: {strategy.num_replicas_in_sync}")
+                
+                # Adjust batch size based on multiplier
+                if args.batch_size:
+                    args.batch_size *= args.batch_size_multiplier
+                    print(f"Adjusted batch size for multi-GPU: {args.batch_size}")
+            except Exception as e:
+                print(f"Error configuring multi-GPU strategy: {e}")
+                strategy = None
+        else:
+            if len(gpus) > 1 and args.single_gpu:
+                print(f"Multiple GPUs detected but using only one GPU due to --single-gpu flag.")
+            elif gpus:
+                print(f"Using {len(gpus)} GPU(s) for model training.")
+            else:
+                print("No GPU available. Using CPU for model training.")
+            strategy = None
     
     # Use configuration values if arguments are not provided
     data_path = args.data_path or config.get_data_path('processed_path')
@@ -702,7 +990,7 @@ def main():
     experiment_name = args.experiment_name or mlflow_config.get('experiment_name', 'Fraud_Detection_Experiment')
     
     # Load and prepare data
-    X_train, X_val, X_test, y_train, y_val, y_test, feature_names, scaler = load_data(data_path)
+    X_train, X_val, X_test, y_train, y_val, y_test, feature_names, scaler = load_and_preprocess_data(data_path)
     input_dim = X_train.shape[1]
     
     # Run experiments
