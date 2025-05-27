@@ -18,6 +18,41 @@ import tensorflow as tf
 import joblib
 from datetime import datetime
 
+# Configure TensorFlow to use GPU if available
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        # Enable memory growth for all GPUs to prevent TensorFlow from allocating all GPU memory at once
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print("\n" + "="*70)
+        print(f"🚀 GPU ACCELERATION ENABLED: Using {len(gpus)} GPU(s) for streaming inference")
+        print("="*70 + "\n")
+        
+        # Configure multi-GPU strategy by default if multiple GPUs are available
+        if len(gpus) > 1:
+            try:
+                print(f"\n" + "="*70)
+                print(f"🚀 MULTI-GPU STREAMING ENABLED: Distributing across {len(gpus)} GPUs")
+                print("="*70 + "\n")
+                
+                # Create a MirroredStrategy for multi-GPU inference
+                strategy = tf.distribute.MirroredStrategy()
+                print(f"Number of devices in sync: {strategy.num_replicas_in_sync}")
+            except Exception as e:
+                print(f"Error configuring multi-GPU strategy: {e}")
+                strategy = None
+        else:
+            strategy = None
+    except RuntimeError as e:
+        print(f"Error configuring GPUs: {e}")
+        strategy = None
+else:
+    print("\n" + "="*70)
+    print("⚠️ NO GPU DETECTED: Using CPU for streaming inference (this will be slower)")
+    print("="*70 + "\n")
+    strategy = None
+
 # Add the project root to the path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if project_root not in sys.path:
@@ -26,12 +61,14 @@ if project_root not in sys.path:
 # Import the configuration manager
 from src.utils.config_manager import config
 
-def create_spark_session(app_name=None):
+def create_spark_session(app_name=None, gpu_available=None, multi_gpu=True):
     """
     Create and return a Spark session configured for streaming.
     
     Args:
         app_name (str, optional): Name of the Spark application. If None, uses the value from config.
+        gpu_available (bool, optional): Whether GPU is available. If None, will be auto-detected.
+        multi_gpu (bool): Whether to configure for multiple GPUs. Default is True.
         
     Returns:
         SparkSession: Configured Spark session
@@ -42,12 +79,65 @@ def create_spark_session(app_name=None):
     driver_memory = spark_config.get('driver_memory', '4g')
     executor_memory = spark_config.get('executor_memory', '4g')
     
-    return (SparkSession.builder
-            .appName(app_name)
-            .config("spark.streaming.stopGracefullyOnShutdown", "true")
-            .config("spark.driver.memory", driver_memory)
-            .config("spark.executor.memory", executor_memory)
-            .getOrCreate())
+    # Auto-detect GPU availability if not explicitly provided
+    if gpu_available is None:
+        gpu_available = False
+        try:
+            import tensorflow as tf
+            gpus = tf.config.list_physical_devices('GPU')
+            gpu_available = len(gpus) > 0
+        except ImportError:
+            pass
+    
+    # Start building the Spark session
+    builder = SparkSession.builder.appName(app_name)
+    
+    # Configure basic Spark settings
+    builder = builder.config("spark.streaming.stopGracefullyOnShutdown", "true")
+    builder = builder.config("spark.driver.memory", driver_memory)
+    builder = builder.config("spark.executor.memory", executor_memory)
+    
+    # Configure GPU acceleration if available
+    if gpu_available:
+        print("\n" + "="*70)
+        print(f"🚀 CONFIGURING SPARK STREAMING FOR GPU ACCELERATION")
+        print("="*70 + "\n")
+        
+        # Enable GPU acceleration for Spark
+        builder = builder.config("spark.rapids.sql.enabled", "true")
+        builder = builder.config("spark.rapids.memory.pinnedPool.size", "2G")
+        builder = builder.config("spark.sql.execution.arrow.pyspark.enabled", "true")
+        builder = builder.config("spark.sql.execution.arrow.maxRecordsPerBatch", "500000")
+        
+        # Configure for multi-GPU if requested and available
+        if multi_gpu:
+            try:
+                import tensorflow as tf
+                gpus = tf.config.list_physical_devices('GPU')
+                if len(gpus) > 1:
+                    print(f"Configuring Spark for {len(gpus)} GPUs...")
+                    # Set concurrent tasks based on GPU count
+                    builder = builder.config("spark.rapids.sql.concurrentGpuTasks", str(len(gpus)))
+                    builder = builder.config("spark.rapids.sql.explain", "ALL")
+                    builder = builder.config("spark.rapids.memory.gpu.pooling.enabled", "true")
+                    builder = builder.config("spark.rapids.sql.multiThreadedRead.numThreads", str(len(gpus) * 2))
+                else:
+                    print("Only one GPU detected. Using single-GPU configuration.")
+                    builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2")
+                    builder = builder.config("spark.rapids.sql.explain", "ALL")
+            except ImportError:
+                # Fall back to default GPU settings if TensorFlow is not available
+                builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2")
+                builder = builder.config("spark.rapids.sql.explain", "ALL")
+        else:
+            # Single GPU configuration
+            builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2")
+            builder = builder.config("spark.rapids.sql.explain", "ALL")
+    else:
+        print("Using CPU-only configuration for Spark")
+    
+    # Create and return the session
+    return builder.getOrCreate()
 
 def load_models(model_dir):
     """
@@ -91,19 +181,31 @@ def load_models(model_dir):
         autoencoder_threshold = 0.1
         print(f"Warning: Autoencoder threshold not found, using default: {autoencoder_threshold}")
     
-    # Load classification model
+    # Load classification model with multi-GPU support if available
     classification_model_path = os.path.join(model_dir, 'classification_model.h5')
     if os.path.exists(classification_model_path):
-        classification_model = tf.keras.models.load_model(classification_model_path)
+        # Use strategy scope if multi-GPU is enabled
+        if 'strategy' in globals() and strategy is not None:
+            print(f"Loading classification model with multi-GPU strategy")
+            with strategy.scope():
+                classification_model = tf.keras.models.load_model(classification_model_path)
+        else:
+            classification_model = tf.keras.models.load_model(classification_model_path)
         print(f"Loaded classification model from {classification_model_path}")
     else:
         classification_model = None
         print(f"Warning: Classification model not found at {classification_model_path}")
     
-    # Load autoencoder model
+    # Load autoencoder model with multi-GPU support if available
     autoencoder_model_path = os.path.join(model_dir, 'autoencoder_model.h5')
     if os.path.exists(autoencoder_model_path):
-        autoencoder_model = tf.keras.models.load_model(autoencoder_model_path)
+        # Use strategy scope if multi-GPU is enabled
+        if 'strategy' in globals() and strategy is not None:
+            print(f"Loading autoencoder model with multi-GPU strategy")
+            with strategy.scope():
+                autoencoder_model = tf.keras.models.load_model(autoencoder_model_path)
+        else:
+            autoencoder_model = tf.keras.models.load_model(autoencoder_model_path)
         print(f"Loaded autoencoder model from {autoencoder_model_path}")
     else:
         autoencoder_model = None
@@ -172,9 +274,9 @@ def process_batch(batch_df, epoch_id, classification_model, autoencoder_model,
         epoch_id: Epoch ID
         classification_model: Trained classification model
         autoencoder_model: Trained autoencoder model
-        scaler: Fitted scaler
+        scaler: Fitted scaler for feature normalization
         feature_names: List of feature names
-        autoencoder_threshold: Threshold for anomaly detection
+        autoencoder_threshold: Threshold for autoencoder anomaly detection
         
     Returns:
         DataFrame: Processed DataFrame with fraud predictions
@@ -185,9 +287,13 @@ def process_batch(batch_df, epoch_id, classification_model, autoencoder_model,
     
     # Log batch information
     print(f"-------------------------------------------")
-    print(f"Batch: {epoch_id}")
+    print(f"Batch: {epoch_id} with {batch_df.count()} transactions")
     print(f"-------------------------------------------")
-    batch_df.show(truncate=False)
+    
+    # Check if multi-GPU strategy is available
+    using_multi_gpu = 'strategy' in globals() and strategy is not None
+    if using_multi_gpu:
+        print(f"Using multi-GPU strategy for batch processing")
     
     # Preprocess data
     preprocessed_df = preprocess_data(batch_df, feature_names, scaler)
@@ -195,18 +301,65 @@ def process_batch(batch_df, epoch_id, classification_model, autoencoder_model,
     # Make predictions
     results = []
     
-    # Classification predictions
+    # Classification predictions with multi-GPU optimization
     if classification_model is not None:
-        classification_probs = classification_model.predict(preprocessed_df).flatten()
+        start_time = datetime.now()
+        
+        if using_multi_gpu:
+            # Create TensorFlow dataset with prefetching for multi-GPU inference
+            X_tensor = tf.convert_to_tensor(preprocessed_df.values, dtype=tf.float32)
+            batch_size = min(len(preprocessed_df), 1024)  # Use appropriate batch size
+            tf_dataset = tf.data.Dataset.from_tensor_slices(X_tensor)
+            tf_dataset = tf_dataset.batch(batch_size)
+            tf_dataset = tf_dataset.prefetch(tf.data.AUTOTUNE)
+            
+            # Run inference in batches
+            classification_probs_list = []
+            for batch in tf_dataset:
+                batch_probs = classification_model.predict(batch, verbose=0)
+                classification_probs_list.append(batch_probs)
+            
+            # Combine results
+            classification_probs = np.vstack(classification_probs_list).flatten()
+        else:
+            # Standard inference
+            classification_probs = classification_model.predict(preprocessed_df.values).flatten()
+        
         classification_preds = (classification_probs >= 0.5).astype(int)
+        inference_time = (datetime.now() - start_time).total_seconds()
+        print(f"Classification inference completed in {inference_time:.3f} seconds")
     else:
         classification_probs = np.zeros(len(preprocessed_df))
         classification_preds = np.zeros(len(preprocessed_df))
     
-    # Autoencoder predictions
+    # Autoencoder predictions with multi-GPU optimization
     if autoencoder_model is not None:
-        anomaly_scores = compute_anomaly_scores(autoencoder_model, preprocessed_df)
+        start_time = datetime.now()
+        
+        if using_multi_gpu:
+            # Create TensorFlow dataset with prefetching for multi-GPU inference
+            X_tensor = tf.convert_to_tensor(preprocessed_df.values, dtype=tf.float32)
+            batch_size = min(len(preprocessed_df), 1024)  # Use appropriate batch size
+            tf_dataset = tf.data.Dataset.from_tensor_slices(X_tensor)
+            tf_dataset = tf_dataset.batch(batch_size)
+            tf_dataset = tf_dataset.prefetch(tf.data.AUTOTUNE)
+            
+            # Run inference in batches
+            reconstructions_list = []
+            for batch in tf_dataset:
+                batch_recon = autoencoder_model.predict(batch, verbose=0)
+                reconstructions_list.append(batch_recon)
+            
+            # Combine results and calculate anomaly scores
+            reconstructions = np.vstack(reconstructions_list)
+            anomaly_scores = np.mean(np.square(preprocessed_df.values - reconstructions), axis=1)
+        else:
+            # Standard inference
+            anomaly_scores = compute_anomaly_scores(autoencoder_model, preprocessed_df)
+        
         autoencoder_preds = (anomaly_scores >= autoencoder_threshold).astype(int)
+        inference_time = (datetime.now() - start_time).total_seconds()
+        print(f"Autoencoder inference completed in {inference_time:.3f} seconds")
     else:
         anomaly_scores = np.zeros(len(preprocessed_df))
         autoencoder_preds = np.zeros(len(preprocessed_df))
@@ -232,16 +385,7 @@ def process_batch(batch_df, epoch_id, classification_model, autoencoder_model,
             if field not in result:
                 result[field] = transaction[field]
         
-        # Log fraud predictions for each transaction
-        fraud_status = "FRAUD DETECTED!" if result['is_fraud'] else "legitimate"
-        print(f"Transaction {result['transaction_id']}: {fraud_status}")
-        print(f"  - Classification probability: {result['fraud_probability']:.4f}")
-        print(f"  - Anomaly score: {result['anomaly_score']:.4f}")
-        
         results.append(result)
-    
-    # Convert results to DataFrame
-    result_df = pd.DataFrame(results)
     
     # Print summary of fraud detections
     fraud_count = sum(1 for r in results if r['is_fraud'])
@@ -288,6 +432,13 @@ def main():
                         help='Output path/topic (depends on format)')
     parser.add_argument('--checkpoint-dir', type=str,
                         help='Directory for streaming checkpoints')
+    # GPU configuration
+    parser.add_argument('--disable-gpu', action='store_true',
+                        help='Disable GPU usage even if available')
+    parser.add_argument('--single-gpu', action='store_true',
+                        help='Use only a single GPU even if multiple are available')
+    parser.add_argument('--memory-growth', action='store_true',
+                        help='Enable memory growth for GPUs to prevent TensorFlow from allocating all memory')
     args = parser.parse_args()
     
     # Use configuration values if arguments are not provided
@@ -298,8 +449,45 @@ def main():
     output_path = args.output_path or config.get('streaming.output_path')
     checkpoint_dir = args.checkpoint_dir or config.get_absolute_path(config.get('streaming.checkpoint_dir', 'checkpoints'))
     
-    # Create Spark session
-    spark = create_spark_session()
+    # Handle GPU configuration based on command-line arguments
+    gpu_available = None  # Auto-detect by default
+    try:
+        import tensorflow as tf
+        gpus = tf.config.list_physical_devices('GPU')
+        
+        if args.disable_gpu:
+            print("\n" + "="*70)
+            print("⚠️ GPU DISABLED: Using CPU for streaming inference as requested")
+            print("="*70 + "\n")
+            tf.config.set_visible_devices([], 'GPU')
+            gpu_available = False
+        elif gpus:
+            if args.single_gpu and len(gpus) > 1:
+                # Use only the first GPU
+                tf.config.set_visible_devices(gpus[0], 'GPU')
+                print(f"\n" + "="*70)
+                print(f"🚀 SINGLE GPU MODE: Using only one GPU ({gpus[0]}) for streaming inference")
+                print("="*70 + "\n")
+            
+            if args.memory_growth:
+                # Enable memory growth for all GPUs
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                print("\n" + "="*70)
+                print(f"🚀 MEMORY GROWTH ENABLED: GPUs will allocate memory as needed")
+                print("="*70 + "\n")
+        else:
+            print("\n" + "="*70)
+            print("⚠️ NO GPU DETECTED: Using CPU for streaming inference")
+            print("="*70 + "\n")
+    except ImportError:
+        print("TensorFlow not available, using CPU for streaming inference")
+        gpu_available = False
+    
+    # Create Spark session with appropriate GPU configuration
+    # Use multi-GPU by default unless single-GPU is specified
+    use_multi_gpu = not args.single_gpu
+    spark = create_spark_session(gpu_available=gpu_available, multi_gpu=use_multi_gpu)
     
     # Load models
     classification_model, autoencoder_model, scaler, feature_names, autoencoder_threshold = load_models(model_dir)
