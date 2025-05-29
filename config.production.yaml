@@ -2,7 +2,7 @@
 
 # Data paths
 data:
-  raw_path: "/app/data/raw/sample_dataset.csv"
+  raw_path: "/app/data/raw/financial_fraud_detection_dataset.csv"
   processed_path: "/app/data/processed/transactions.parquet"
   test_path: "/app/data/processed/test_data.parquet"
 
@@ -33,7 +33,7 @@ evaluation:
 # MLflow configurations
 mlflow:
   experiment_name: "Fraud_Detection_Production"
-  tracking_uri: "http://mlflow:5000"
+  tracking_uri: "http://mlflow:5001"
   
 # Spark configurations
 spark:

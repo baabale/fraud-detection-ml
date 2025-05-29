@@ -33,9 +33,6 @@ imbalanced-learn==0.10.1\n\
 matplotlib==3.6.2\n\
 seaborn==0.12.1\n\
 \n\
-# Development and Notebooks\n\
-jupyter==1.0.0\n\
-\n\
 # MLOps and Experiment Tracking\n\
 mlflow==2.0.1\n\
 pyyaml==6.0\n\

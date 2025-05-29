@@ -19,7 +19,9 @@ This project implements a comprehensive fraud detection system that combines big
 - **Real-time Detection**: Stream processing for immediate fraud alerts
 - **Model Monitoring**: Drift detection and performance tracking
 - **Interactive Interface**: User-friendly command menu for all operations
-- **Comprehensive Evaluation**: Detailed metrics and visualizations
+- **Comprehensive Evaluation**: Detailed metrics and visualizations with business impact analysis
+- **Advanced Sampling**: Cluster-based SMOTE for better handling of imbalanced fraud data
+- **Cost-Sensitive Evaluation**: Financial impact metrics and cost-optimal threshold determination
 
 ## 🛠️ Technologies
 
@@ -207,9 +209,19 @@ python src/spark_jobs/streaming_fraud_detection.py
 
 The system achieves high accuracy in fraud detection through a combination of supervised and unsupervised approaches:
 
-- Classification model: High precision and recall for known fraud patterns
-- Autoencoder model: Effective at detecting novel and unusual transaction patterns
-- Ensemble approach: Combines strengths of both models for robust detection
+- **Classification model**: High accuracy for known fraud patterns
+  - Improved with L2 regularization (0.001) to prevent overfitting
+  - Enhanced with cluster-based SMOTE sampling for better preservation of fraud pattern distributions
+  - Uses asymmetric focal loss with tuned parameters (gamma=4.0, alpha=0.3) for better fraud detection
+  - Includes cost-sensitive evaluation metrics to translate model performance into business value
+  - Provides financial impact visualizations to find cost-optimal classification thresholds
+
+- **Autoencoder model**: Effective at detecting novel and unusual transaction patterns
+  - Improved with larger encoding dimension (24 instead of 16)
+  - Enhanced with L2 regularization for better generalization
+  - Optimized threshold selection (90th percentile) for anomaly detection
+
+- **Ensemble approach**: Combines strengths of both models for robust detection
 
 Detailed performance metrics and visualizations are generated in the `/results` directory.
 

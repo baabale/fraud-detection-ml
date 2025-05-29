@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Implemented cluster-based SMOTE sampling technique for better preservation of minority class distribution patterns
+- Added cost-sensitive evaluation metrics to translate model performance into business value
+- Added financial impact visualization tools to find cost-optimal classification thresholds
+- Added cyclical time encoding features (hour, day, month) to capture time patterns in transactions
+- Implemented transaction sequence features to track patterns in transaction behavior
+- Enhanced model architecture with deeper neural networks for better feature learning
+- Implemented L2 regularization to prevent overfitting in classification models
+- Optimized sampling techniques with Borderline SMOTE for improved handling of class imbalance
+- Added asymmetric focal loss function with tuned parameters for better fraud detection
+- Improved autoencoder model with larger encoding dimension and regularization
+- Added command-line support for L2 regularization parameter
 - API documentation with detailed endpoint descriptions
 - Enhanced model deployment with input shape handling
 - Fixed port conflict issues in API deployment
@@ -21,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added improved recommendations in monitoring reports based on model performance and data drift
 
 ### Fixed
+- Fixed null reference error in PySpark data preprocessing by replacing 'null' with 'lit(None)'
 - Resolved NaN handling in model training and evaluation
 - Fixed model file path issues in deployment scripts
 - Addressed input feature mismatch between training and deployment

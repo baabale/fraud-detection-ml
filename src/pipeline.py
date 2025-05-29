@@ -50,23 +50,63 @@ def run_command(command, description):
     logger.info(f"Starting: {description}")
     logger.info(f"Command: {command}")
     
+    # Set environment variable to disable output buffering in Python subprocesses
+    env = os.environ.copy()
+    env['PYTHONUNBUFFERED'] = '1'
+    
     start_time = time.time()
     process = subprocess.Popen(
         command,
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        universal_newlines=True
+        universal_newlines=True,
+        bufsize=0,  # Unbuffered output
+        env=env
     )
     
-    # Stream output to logs
-    for stdout_line in iter(process.stdout.readline, ""):
-        if stdout_line:
-            logger.info(stdout_line.strip())
+    # Use a separate thread for each stream to avoid blocking
+    import threading
+    import queue
+    import sys
     
-    for stderr_line in iter(process.stderr.readline, ""):
-        if stderr_line:
-            logger.error(stderr_line.strip())
+    def enqueue_output(stream, queue_obj, is_error=False):
+        for line in iter(stream.readline, ''):
+            queue_obj.put((line.strip(), is_error))
+        stream.close()
+    
+    q = queue.Queue()
+    stdout_thread = threading.Thread(target=enqueue_output, args=(process.stdout, q))
+    stderr_thread = threading.Thread(target=enqueue_output, args=(process.stderr, q, True))
+    stdout_thread.daemon = True
+    stderr_thread.daemon = True
+    stdout_thread.start()
+    stderr_thread.start()
+    
+    # Read from queue and log in real-time
+    while stdout_thread.is_alive() or stderr_thread.is_alive() or not q.empty():
+        try:
+            line, is_error = q.get(timeout=0.1)
+            if is_error:
+                # Check if this is a log line from a subprocess
+                if line.startswith(('20', '19')) and (' - ' in line):
+                    # This is already a formatted log line, just print it without re-logging
+                    print(line, file=sys.stderr, flush=True)
+                else:
+                    logger.error(line)
+                    print(line, file=sys.stderr, flush=True)
+            else:
+                # Check if this is a log line from a subprocess
+                if line.startswith(('20', '19')) and (' - ' in line):
+                    # This is already a formatted log line, just print it without re-logging
+                    print(line, flush=True)
+                else:
+                    logger.info(line)
+                    print(line, flush=True)
+        except queue.Empty:
+            # Check if process has terminated and all output has been processed
+            if not stdout_thread.is_alive() and not stderr_thread.is_alive() and q.empty():
+                break
     
     # Wait for process to complete
     return_code = process.wait()
@@ -143,6 +183,32 @@ def run_model_training(config, model_type):
         f"--experiment-name {config['mlflow']['experiment_name']} "
         f"--model-dir {model_dir}"
     )
+    
+    # Add advanced sampling parameters if configured for classification models
+    if model_type == 'classification' and 'sampling' in config.get('models', {}):
+        sampling_config = config['models']['sampling']
+        if 'technique' in sampling_config:
+            command += f" --sampling-technique {sampling_config['technique']}"
+        if 'ratio' in sampling_config:
+            command += f" --sampling-ratio {sampling_config['ratio']}"
+        if 'k_neighbors' in sampling_config:
+            command += f" --k-neighbors {sampling_config['k_neighbors']}"
+    
+    # Add custom loss function parameters if configured for classification models
+    if model_type == 'classification' and 'loss_function' in config.get('models', {}):
+        loss_config = config['models']['loss_function']
+        if 'name' in loss_config:
+            command += f" --loss-function {loss_config['name']}"
+        if 'focal_gamma' in loss_config:
+            command += f" --focal-gamma {loss_config['focal_gamma']}"
+        if 'focal_alpha' in loss_config:
+            command += f" --focal-alpha {loss_config['focal_alpha']}"
+        if 'class_weight_ratio' in loss_config:
+            command += f" --class-weight-ratio {loss_config['class_weight_ratio']}"
+    
+    # Add L2 regularization if configured
+    if model_type in ['classification', 'autoencoder'] and 'l2_regularization' in config.get('models', {}).get(model_type, {}):
+        command += f" --l2-regularization {config['models'][model_type]['l2_regularization']}"
     
     # Add GPU-specific parameters if configured
     if 'gpu' in config and config['gpu']:

@@ -5,18 +5,19 @@ services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:latest
     ports:
-      - "5000:5000"
+      - "5001:5000"
     volumes:
       - ./mlruns:/mlruns
     environment:
-      - MLFLOW_TRACKING_URI=http://localhost:5000
+      - MLFLOW_TRACKING_URI=http://localhost:5001
     command: mlflow server --host 0.0.0.0 --port 5000
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    # Healthcheck disabled temporarily
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:5000"]
+    #   interval: 10s
+    #   timeout: 5s
+    #   retries: 3
+    #   start_period: 30s
 
   # Fraud detection pipeline
   fraud-detection:
@@ -29,7 +30,7 @@ services:
       - ./data:/app/data
       - ./results:/app/results
     environment:
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_TRACKING_URI=http://mlflow:5001
       - CONFIG_PATH=/app/config.production.yaml
     command: python src/pipeline.py
 
@@ -44,7 +45,7 @@ services:
       - ./data:/app/data
       - ./results:/app/results
     environment:
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_TRACKING_URI=http://mlflow:5001
       - CONFIG_PATH=/app/config.production.yaml
     command: python src/spark_jobs/streaming_fraud_detection.py
 
@@ -59,6 +60,6 @@ services:
       - ./data:/app/data
       - ./results:/app/results
     environment:
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_TRACKING_URI=http://mlflow:5001
       - CONFIG_PATH=/app/config.production.yaml
     command: python src/models/model_monitoring.py

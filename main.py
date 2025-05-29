@@ -72,22 +72,61 @@ def run_command(command):
     logger.info(f"Running command: {command}")
     
     try:
+        # Set environment variable to disable output buffering in Python subprocesses
+        env = os.environ.copy()
+        env['PYTHONUNBUFFERED'] = '1'
+        
         process = subprocess.Popen(
             command,
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True
+            universal_newlines=True,
+            bufsize=0,  # Unbuffered output
+            env=env
         )
         
-        # Stream output to logs
-        for stdout_line in iter(process.stdout.readline, ""):
-            if stdout_line:
-                logger.info(stdout_line.strip())
+        # Use a separate thread for each stream to avoid blocking
+        import threading
+        import queue
         
-        for stderr_line in iter(process.stderr.readline, ""):
-            if stderr_line:
-                logger.error(stderr_line.strip())
+        def enqueue_output(stream, queue_obj, is_error=False):
+            for line in iter(stream.readline, ''):
+                queue_obj.put((line.strip(), is_error))
+            stream.close()
+        
+        q = queue.Queue()
+        stdout_thread = threading.Thread(target=enqueue_output, args=(process.stdout, q))
+        stderr_thread = threading.Thread(target=enqueue_output, args=(process.stderr, q, True))
+        stdout_thread.daemon = True
+        stderr_thread.daemon = True
+        stdout_thread.start()
+        stderr_thread.start()
+        
+        # Read from queue and log in real-time
+        while stdout_thread.is_alive() or stderr_thread.is_alive() or not q.empty():
+            try:
+                line, is_error = q.get(timeout=0.1)
+                if is_error:
+                    # Check if this is a log line from a subprocess
+                    if line.startswith(('20', '19')) and (' - ' in line):
+                        # This is already a formatted log line, just print it without re-logging
+                        print(line, file=sys.stderr, flush=True)
+                    else:
+                        logger.error(line)
+                        print(line, file=sys.stderr, flush=True)
+                else:
+                    # Check if this is a log line from a subprocess
+                    if line.startswith(('20', '19')) and (' - ' in line):
+                        # This is already a formatted log line, just print it without re-logging
+                        print(line, flush=True)
+                    else:
+                        logger.info(line)
+                        print(line, flush=True)
+            except queue.Empty:
+                # Check if process has terminated and all output has been processed
+                if not stdout_thread.is_alive() and not stderr_thread.is_alive() and q.empty():
+                    break
         
         # Wait for process to complete
         return_code = process.wait()

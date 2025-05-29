@@ -10,11 +10,36 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import logging
+import warnings
 from datetime import datetime, timedelta
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import tensorflow as tf
 import joblib
 from scipy.stats import ks_2samp
+
+# Filter sklearn warnings to avoid excessive logging
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
+# Specifically filter out the precision warning that's causing most of the noise
+warnings.filterwarnings('ignore', message='Precision is ill-defined and being set to 0.0')
+# Filter TensorFlow deprecation warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+# Configure logging for real-time output
+os.makedirs('logs', exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/model_monitoring.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger('fraud_detection_monitoring')
+
+# Force stdout to flush immediately
+sys.stdout.reconfigure(line_buffering=True)
 
 # Configure TensorFlow to use GPU if available
 gpus = tf.config.list_physical_devices('GPU')

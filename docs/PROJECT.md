@@ -89,32 +89,69 @@ if __name__ == "__main__":
 
 ### Deep Learning Model (TensorFlow)
 
-A basic neural network architecture for fraud classification using TensorFlow/Keras. This example defines a feedforward model. For anomaly detection, this could be modified into an autoencoder or more complex network.
+We've implemented advanced neural network architectures for fraud detection using TensorFlow/Keras. The system includes both classification models for supervised learning and autoencoder models for unsupervised anomaly detection.
+
+#### Classification Model
 
 ```python
-# src/models/fraud_model.py
+# src/models/train_model.py (simplified version)
 import tensorflow as tf
-from tensorflow.keras import layers, models
+from tensorflow.keras import layers, models, regularizers
 
-def create_model(input_dim):
-    model = models.Sequential([
-        layers.InputLayer(input_shape=(input_dim,)),
-        layers.Dense(64, activation='relu'),
-        layers.Dropout(0.4),
-        layers.Dense(32, activation='relu'),
-        layers.Dense(1, activation='sigmoid')  # Binary output (fraud vs non-fraud)
-    ])
-    model.compile(optimizer='adam',
-                  loss='binary_crossentropy',
-                  metrics=['accuracy'])
+def create_classification_model(input_dim, hidden_layers=[256, 128, 64, 32], dropout_rate=0.5, l2_regularization=0.001):
+    model = models.Sequential()
+    model.add(layers.InputLayer(input_shape=(input_dim,)))
+    
+    # Add hidden layers with L2 regularization and dropout
+    for units in hidden_layers:
+        model.add(layers.Dense(units, activation='relu', 
+                              kernel_regularizer=regularizers.l2(l2_regularization)))
+        model.add(layers.Dropout(dropout_rate))
+    
+    # Output layer for binary classification
+    model.add(layers.Dense(1, activation='sigmoid'))
+    
+    # Compile with custom loss function for imbalanced data
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+        loss=asymmetric_focal_loss(gamma=4.0, alpha=0.3),
+        metrics=['accuracy', tf.keras.metrics.AUC(), tf.keras.metrics.Recall(), 
+                 tf.keras.metrics.Precision()]
+    )
     return model
+```
 
-if __name__ == "__main__":
-    # Placeholder for loading preprocessed data and training the model
-    # X_train, y_train = ...
-    # model = create_model(input_dim=X_train.shape[1])
-    # model.fit(X_train, y_train, epochs=10, batch_size=256, validation_split=0.2)
-    pass
+#### Autoencoder Model
+
+```python
+# Autoencoder for unsupervised anomaly detection
+def create_autoencoder_model(input_dim, encoding_dim=24, hidden_layers=[128, 64], l2_regularization=0.001):
+    # Encoder
+    input_layer = layers.Input(shape=(input_dim,))
+    encoded = input_layer
+    
+    for units in hidden_layers:
+        encoded = layers.Dense(units, activation='relu',
+                              kernel_regularizer=regularizers.l2(l2_regularization))(encoded)
+    
+    # Bottleneck layer
+    bottleneck = layers.Dense(encoding_dim, activation='relu',
+                            kernel_regularizer=regularizers.l2(l2_regularization))(encoded)
+    
+    # Decoder (mirror of encoder)
+    decoded = bottleneck
+    for units in reversed(hidden_layers):
+        decoded = layers.Dense(units, activation='relu',
+                              kernel_regularizer=regularizers.l2(l2_regularization))(decoded)
+    
+    # Output reconstruction
+    output_layer = layers.Dense(input_dim, activation='linear')(decoded)
+    
+    # Create model
+    model = models.Model(inputs=input_layer, outputs=output_layer)
+    model.compile(optimizer='adam', loss='mse')
+    
+    return model
 ```
 
 ### MLflow Configuration (Placeholder)
