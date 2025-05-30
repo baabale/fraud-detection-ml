@@ -1240,6 +1240,19 @@ def main():
     mlflow_tracking_uri = args.mlflow_tracking_uri or mlflow_config.get('tracking_uri', 'http://localhost:5000')
     experiment_name = args.experiment_name or mlflow_config.get('experiment_name', 'Fraud_Detection_Experiment')
     
+    # Check if MLflow server is available
+    if use_mlflow:
+        try:
+            import mlflow
+            mlflow.set_tracking_uri(mlflow_tracking_uri)
+            # Try to connect to the server with a short timeout
+            mlflow.get_experiment_by_name(experiment_name)
+            logger.info(f"Successfully connected to MLflow server at {mlflow_tracking_uri}")
+        except Exception as e:
+            logger.warning(f"Failed to connect to MLflow server: {e}")
+            logger.warning("Disabling MLflow tracking for this run. Start the MLflow server with './start_mlflow_server.sh' if you want to use tracking.")
+            use_mlflow = False
+    
     # Load and prepare data
     print(f"\nUsing sampling technique: {sampling_technique}")
     X_train, X_val, X_test, y_train, y_val, y_test, feature_names, scaler = load_and_preprocess_data(
