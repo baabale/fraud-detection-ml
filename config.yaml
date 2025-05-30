@@ -2,7 +2,7 @@
 
 # Data paths
 data:
-  raw_path: "data/raw/financial_fraud_detection_dataset.csv"
+  raw_path: "data/raw/sample_dataset_small.csv"
   processed_path: "data/processed/transactions.parquet"
   test_path: "data/processed/test_data.parquet"  # Will be created during data processing
 

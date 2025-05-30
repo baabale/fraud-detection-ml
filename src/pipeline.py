@@ -246,7 +246,7 @@ def run_model_evaluation(config, model_type):
     # Use the processed data for testing as well since we're working with a sample dataset
     test_data_path = config['data']['processed_path']
     model_dir = config['models']['output_dir']
-    model_path = os.path.join(model_dir, f"{model_type}_model_model.h5")
+    model_path = os.path.join(model_dir, f"{model_type}_model_model.keras")
     results_dir = config['evaluation']['output_dir']
     
     # Ensure directories exist

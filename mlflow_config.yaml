@@ -9,7 +9,7 @@ tracking:
   
 # Artifact store configuration
 artifact_store:
-  path: "./mlruns"  # Local path for storing artifacts
+  path: "./mlflow_tracking"  # Local path for storing artifacts
   
 # Model registry configuration
 model_registry:

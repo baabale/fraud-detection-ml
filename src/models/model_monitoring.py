@@ -119,7 +119,7 @@ def load_model_artifacts(model_dir):
     print(f"Loading model artifacts from {model_dir}")
     
     # Load model
-    model_path = os.path.join(model_dir, 'classification_model.h5')
+    model_path = os.path.join(model_dir, 'classification_model.keras')
     if os.path.exists(model_path):
         model = tf.keras.models.load_model(model_path)
         print(f"Loaded model from {model_path}")

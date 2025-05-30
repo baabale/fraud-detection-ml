@@ -326,7 +326,23 @@ def preprocess_data(df):
         # Calculate rolling statistics on recent transactions
         df = df.withColumn("avg_amount_last5", avg(col("amount")).over(rolling_window_5))
         df = df.withColumn("max_amount_last5", max(col("amount")).over(rolling_window_5))
+        
+        # Count transactions in the window
         df = df.withColumn("tx_count_last5", count(col("amount")).over(rolling_window_5))
+        
+        # Calculate transaction frequency (transactions per day over the last 5 transactions)
+        # First calculate the time span in days
+        df = df.withColumn("time_span_days", 
+                          when(min(col("timestamp").cast("long")).over(rolling_window_5).isNotNull(),
+                              (col("timestamp").cast("long") - 
+                               min(col("timestamp").cast("long")).over(rolling_window_5)) / (60 * 60 * 24))
+                          .otherwise(lit(1.0)))
+        
+        # Then calculate the transaction frequency (tx per day)
+        df = df.withColumn("transaction_frequency", 
+                          when(col("time_span_days") > 0, 
+                               col("tx_count_last5") / col("time_span_days"))
+                          .otherwise(col("tx_count_last5")))
         
         # Deviation from recent transaction patterns
         df = df.withColumn("amount_deviation_from_avg", 

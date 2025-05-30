@@ -182,7 +182,7 @@ def load_models(model_dir):
         print(f"Warning: Autoencoder threshold not found, using default: {autoencoder_threshold}")
     
     # Load classification model with multi-GPU support if available
-    classification_model_path = os.path.join(model_dir, 'classification_model.h5')
+    classification_model_path = os.path.join(model_dir, 'classification_model.keras')
     if os.path.exists(classification_model_path):
         # Use strategy scope if multi-GPU is enabled
         if 'strategy' in globals() and strategy is not None:
@@ -197,7 +197,7 @@ def load_models(model_dir):
         print(f"Warning: Classification model not found at {classification_model_path}")
     
     # Load autoencoder model with multi-GPU support if available
-    autoencoder_model_path = os.path.join(model_dir, 'autoencoder_model.h5')
+    autoencoder_model_path = os.path.join(model_dir, 'autoencoder_model.keras')
     if os.path.exists(autoencoder_model_path):
         # Use strategy scope if multi-GPU is enabled
         if 'strategy' in globals() and strategy is not None:

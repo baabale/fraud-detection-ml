@@ -42,6 +42,10 @@ if [ "$START_MLFLOW" = true ]; then
   if nc -z localhost 5000 2>/dev/null; then
     echo "MLflow server is already running on port 5000"
   else
+    # Create MLflow tracking directory with proper permissions
+    mkdir -p mlflow_tracking
+    chmod -R 755 mlflow_tracking
+    
     # Start MLflow server in the background
     ./start_mlflow_server.sh > logs/mlflow_server.log 2>&1 &
     MLFLOW_PID=$!
