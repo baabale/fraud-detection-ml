@@ -35,6 +35,9 @@ ENV/
 !/data/raw/.gitkeep
 !/data/processed/.gitkeep
 !/data/test/.gitkeep
+# Include sample datasets
+!/data/raw/sample_dataset.csv
+!/data/raw/sample_dataset_small.csv
 
 # Model files
 /results/models/*
