@@ -246,11 +246,57 @@ def run_model_evaluation(config, model_type):
     # Use the processed data for testing as well since we're working with a sample dataset
     test_data_path = config['data']['processed_path']
     model_dir = config['models']['output_dir']
-    model_path = os.path.join(model_dir, f"{model_type}_model_model.keras")
     results_dir = config['evaluation']['output_dir']
     
     # Ensure directories exist
     os.makedirs(results_dir, exist_ok=True)
+    
+    # Find the latest model file with the matching model_type
+    import glob
+    import json
+    
+    # First try to find models by examining their parameter files
+    # This is more reliable as it checks the actual model type in the parameters
+    params_pattern = os.path.join(model_dir, f"*_params.json")
+    params_files = glob.glob(params_pattern)
+    
+    matching_models = []
+    
+    if params_files:
+        # Sort by modification time (newest first)
+        params_files.sort(key=os.path.getmtime, reverse=True)
+        
+        # Check each parameter file to find matching model type
+        for params_file in params_files:
+            try:
+                with open(params_file, 'r') as f:
+                    params = json.load(f)
+                    # Check if this is the model type we're looking for
+                    if params.get('model_type') == model_type:
+                        # Convert params filename to model filename
+                        # Example: fraud_detection_20250530_105338_params.json -> fraud_detection_20250530_105338_model.keras
+                        base_name = os.path.basename(params_file).replace('_params.json', '_model.keras')
+                        model_file = os.path.join(model_dir, base_name)
+                        if os.path.exists(model_file):
+                            matching_models.append(model_file)
+            except Exception as e:
+                logger.warning(f"Error reading params file {params_file}: {e}")
+    
+    # If we couldn't find models using params files, fall back to looking for model files directly
+    if not matching_models:
+        logger.warning(f"Could not find models using parameter files, falling back to filename pattern matching")
+        # Look for model files with timestamps
+        model_files = glob.glob(os.path.join(model_dir, f"*_model.keras"))
+        model_files.sort(key=os.path.getmtime, reverse=True)
+        matching_models = model_files
+    
+    if not matching_models:
+        logger.error(f"No model files found for model type: {model_type}")
+        return False
+    
+    # Use the latest matching model
+    model_path = matching_models[0]
+    logger.info(f"Using latest {model_type} model file: {model_path}")
     
     # Build command
     command = (

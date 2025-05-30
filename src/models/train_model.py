@@ -410,28 +410,119 @@ def save_model_artifacts(model, model_type, scaler, feature_names, params, resul
     os.makedirs(model_dir, exist_ok=True)
     print(f"Saving model artifacts to {model_dir}")
     
-    # Save model using native Keras format
+    # Save model using native Keras format with timestamp name
     model_path = os.path.join(model_dir, f"{params['run_name']}_model.keras")
     model.save(model_path)  # The .keras extension automatically uses the native Keras format
+    
+    # Create a standardized name for the model that the evaluation script expects
+    standard_model_path = os.path.join(model_dir, f"{model_type}_model_model.keras")
+    
+    # Remove existing symlink or file if it exists
+    if os.path.exists(standard_model_path) or os.path.islink(standard_model_path):
+        try:
+            os.remove(standard_model_path)
+        except Exception as e:
+            print(f"Warning: Could not remove existing model file: {e}")
+    
+    # Create a symbolic link with the standardized name
+    try:
+        # Use relative path for the symlink to make it more portable
+        os.symlink(os.path.basename(model_path), standard_model_path)
+        print(f"Created symbolic link: {standard_model_path} -> {os.path.basename(model_path)}")
+    except Exception as e:
+        print(f"Warning: Could not create symbolic link: {e}")
+        # If symlink fails, try to copy the file instead
+        try:
+            import shutil
+            shutil.copy2(model_path, standard_model_path)
+            print(f"Copied model to standardized path: {standard_model_path}")
+        except Exception as e2:
+            print(f"Error: Could not copy model file: {e2}")
     
     # Save scaler
     scaler_path = os.path.join(model_dir, f"{params['run_name']}_scaler.joblib")
     joblib.dump(scaler, scaler_path)
+    
+    # Create a standardized name for the scaler
+    standard_scaler_path = os.path.join(model_dir, f"{model_type}_model_scaler.joblib")
+    if os.path.exists(standard_scaler_path) or os.path.islink(standard_scaler_path):
+        try:
+            os.remove(standard_scaler_path)
+        except Exception:
+            pass
+    try:
+        os.symlink(os.path.basename(scaler_path), standard_scaler_path)
+    except Exception:
+        try:
+            import shutil
+            shutil.copy2(scaler_path, standard_scaler_path)
+        except Exception:
+            pass
     
     # Save feature names
     feature_names_path = os.path.join(model_dir, f"{params['run_name']}_feature_names.json")
     with open(feature_names_path, 'w') as f:
         json.dump(feature_names, f)
     
+    # Create a standardized name for the feature names
+    standard_features_path = os.path.join(model_dir, f"{model_type}_model_feature_names.json")
+    if os.path.exists(standard_features_path) or os.path.islink(standard_features_path):
+        try:
+            os.remove(standard_features_path)
+        except Exception:
+            pass
+    try:
+        os.symlink(os.path.basename(feature_names_path), standard_features_path)
+    except Exception:
+        try:
+            import shutil
+            shutil.copy2(feature_names_path, standard_features_path)
+        except Exception:
+            pass
+    
     # Save model parameters
     params_path = os.path.join(model_dir, f"{params['run_name']}_params.json")
     with open(params_path, 'w') as f:
         json.dump(params, f)
     
+    # Create a standardized name for the parameters
+    standard_params_path = os.path.join(model_dir, f"{model_type}_model_params.json")
+    if os.path.exists(standard_params_path) or os.path.islink(standard_params_path):
+        try:
+            os.remove(standard_params_path)
+        except Exception:
+            pass
+    try:
+        os.symlink(os.path.basename(params_path), standard_params_path)
+    except Exception:
+        try:
+            import shutil
+            shutil.copy2(params_path, standard_params_path)
+        except Exception:
+            pass
+    
     # Save training results
     results_path = os.path.join(model_dir, f"{params['run_name']}_results.json")
     with open(results_path, 'w') as f:
         json.dump(results, f)
+    
+    # Create a standardized name for the results
+    standard_results_path = os.path.join(model_dir, f"{model_type}_model_results.json")
+    if os.path.exists(standard_results_path) or os.path.islink(standard_results_path):
+        try:
+            os.remove(standard_results_path)
+        except Exception:
+            pass
+    try:
+        os.symlink(os.path.basename(results_path), standard_results_path)
+    except Exception:
+        try:
+            import shutil
+            shutil.copy2(results_path, standard_results_path)
+        except Exception:
+            pass
+    
+    print(f"Model artifacts saved with both timestamped and standardized names in {model_dir}")
 
 def evaluate_classification_model(model, X_test, y_test):
     """
