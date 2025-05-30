@@ -285,8 +285,8 @@ def main():
     project_root = os.path.abspath(os.path.join(script_dir, '../..'))
     
     # Define default paths using absolute paths
-    default_classification_model = os.path.join(project_root, 'results/models/classification_model_model.h5')
-    default_autoencoder_model = os.path.join(project_root, 'results/models/autoencoder_model_model.h5')
+    default_classification_model = os.path.join(project_root, 'results/models/classification_model_model.keras')
+    default_autoencoder_model = os.path.join(project_root, 'results/models/autoencoder_model_model.keras')
     default_data_path = os.path.join(project_root, 'data/processed/transactions.parquet')
     default_output_dir = os.path.join(project_root, 'results/deployment')
     
@@ -317,14 +317,14 @@ def main():
     # If model-dir is provided, use it to find models
     if args.model_dir and os.path.exists(args.model_dir):
         # Look for classification model in model_dir
-        classification_model_path = os.path.join(args.model_dir, 'classification_model_model.h5')
+        classification_model_path = os.path.join(args.model_dir, 'classification_model_model.keras')
         if not os.path.exists(classification_model_path):
-            classification_model_path = os.path.join(args.model_dir, 'classification_model.h5')
+            classification_model_path = os.path.join(args.model_dir, 'classification_model.keras')
         
         # Look for autoencoder model in model_dir
-        autoencoder_model_path = os.path.join(args.model_dir, 'autoencoder_model_model.h5')
+        autoencoder_model_path = os.path.join(args.model_dir, 'autoencoder_model_model.keras')
         if not os.path.exists(autoencoder_model_path):
-            autoencoder_model_path = os.path.join(args.model_dir, 'autoencoder_model.h5')
+            autoencoder_model_path = os.path.join(args.model_dir, 'autoencoder_model.keras')
         
         # Update the model paths if found
         if os.path.exists(classification_model_path):
@@ -374,7 +374,7 @@ def main():
     # Save classification model artifacts
     if os.path.exists(args.classification_model):
         # Create a copy with the standard name expected by the deployment script
-        classification_dest = os.path.join(args.output_dir, 'classification_model.h5')
+        classification_dest = os.path.join(args.output_dir, 'classification_model.keras')
         try:
             import shutil
             shutil.copy2(args.classification_model, classification_dest)
@@ -394,7 +394,7 @@ def main():
     # Save autoencoder model artifacts
     if os.path.exists(args.autoencoder_model):
         # Create a copy with the standard name expected by the deployment script
-        autoencoder_dest = os.path.join(args.output_dir, 'autoencoder_model.h5')
+        autoencoder_dest = os.path.join(args.output_dir, 'autoencoder_model.keras')
         try:
             import shutil
             shutil.copy2(args.autoencoder_model, autoencoder_dest)

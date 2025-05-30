@@ -278,6 +278,26 @@ def load_and_preprocess_data(data_path, test_size=0.2, val_size=0.25, random_sta
         # Fill NaN values with column means
         print("Filling NaN values with column means")
         df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].mean())
+        
+    # Check for transaction_frequency feature, add if missing
+    if 'transaction_frequency' not in df.columns:
+        print("Warning: 'transaction_frequency' feature not found in dataset. Adding with default values.")
+        # Calculate a simple version based on time_since_last_transaction if available
+        if 'time_since_last_transaction' in df.columns:
+            # Convert to transactions per day (86400 seconds in a day)
+            df['transaction_frequency'] = np.where(
+                df['time_since_last_transaction'] > 0,
+                86400 / df['time_since_last_transaction'],
+                1.0  # Default value for first transaction
+            )
+            print("Created 'transaction_frequency' feature from 'time_since_last_transaction'")
+        else:
+            # If no time data available, use a default value
+            df['transaction_frequency'] = 1.0
+            print("Added 'transaction_frequency' with default value of 1.0")
+            
+        # Add to numeric_cols list
+        numeric_cols.append('transaction_frequency')
     
     # Separate features and target
     y = df[target_col].values
@@ -392,7 +412,7 @@ def save_model_artifacts(model, model_type, scaler, feature_names, params, resul
     
     # Save model using native Keras format
     model_path = os.path.join(model_dir, f"{params['run_name']}_model.keras")
-    model.save(model_path, save_format='keras')
+    model.save(model_path)  # The .keras extension automatically uses the native Keras format
     
     # Save scaler
     scaler_path = os.path.join(model_dir, f"{params['run_name']}_scaler.joblib")
@@ -767,7 +787,7 @@ def run_classification_experiment(X_train, X_val, X_test, y_train, y_val, y_test
         mlflow.log_param('class_weight', str(class_weights))
         
         # Model path
-        model_path = os.path.join(model_dir, f"{params['run_name']}_model.h5")
+        model_path = os.path.join(model_dir, f"{params['run_name']}_model.keras")
         
         # Get loss function parameters
         loss_function = params.get('loss_function', 'binary_crossentropy')
@@ -830,7 +850,7 @@ def run_classification_experiment(X_train, X_val, X_test, y_train, y_val, y_test
         import tempfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             model_path = os.path.join(tmp_dir, "model.keras")
-            model.save(model_path, save_format="keras")
+            model.save(model_path)  # The .keras extension automatically uses the native Keras format
             
             # Log model with signature and sample input
             mlflow.tensorflow.log_model(
@@ -1020,7 +1040,7 @@ def run_autoencoder_experiment(X_train, X_val, X_test, y_train, y_val, y_test,
             X_val_normal = None
         
         # Model path
-        model_path = os.path.join(model_dir, f"{params['run_name']}_model.h5")
+        model_path = os.path.join(model_dir, f"{params['run_name']}_model.keras")
         
         # Train model
         model, history = train_autoencoder_model(
@@ -1078,7 +1098,7 @@ def run_autoencoder_experiment(X_train, X_val, X_test, y_train, y_val, y_test,
         import tempfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             model_path = os.path.join(tmp_dir, "model.keras")
-            model.save(model_path, save_format="keras")
+            model.save(model_path)  # The .keras extension automatically uses the native Keras format
             
             # Log model with signature and sample input
             mlflow.tensorflow.log_model(
@@ -1244,6 +1264,7 @@ def main():
     if use_mlflow:
         try:
             import mlflow
+            # Set tracking URI to the new directory
             mlflow.set_tracking_uri(mlflow_tracking_uri)
             # Try to connect to the server with a short timeout
             mlflow.get_experiment_by_name(experiment_name)
@@ -1251,6 +1272,8 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to connect to MLflow server: {e}")
             logger.warning("Disabling MLflow tracking for this run. Start the MLflow server with './start_mlflow_server.sh' if you want to use tracking.")
+            logger.warning("You can run training without MLflow using: ./run_training.sh")
+            logger.warning("Or start MLflow server first with: ./start_mlflow_server.sh")
             use_mlflow = False
     
     # Load and prepare data

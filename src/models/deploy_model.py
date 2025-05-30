@@ -168,7 +168,7 @@ def load_models(model_dir, model_type='both'):
     # Load classification model if TensorFlow is available
     if model_type in ['classification', 'both']:
         if TENSORFLOW_AVAILABLE:
-            classification_model_path = os.path.join(model_dir, 'classification_model.h5')
+            classification_model_path = os.path.join(model_dir, 'classification_model.keras')
             if os.path.exists(classification_model_path):
                 try:
                     classification_model = tf.keras.models.load_model(classification_model_path)
@@ -187,7 +187,7 @@ def load_models(model_dir, model_type='both'):
     if model_type in ['autoencoder', 'both']:
         if TENSORFLOW_AVAILABLE:
             # Load autoencoder model
-            autoencoder_path = os.path.join(model_dir, 'autoencoder_model.h5')
+            autoencoder_path = os.path.join(model_dir, 'autoencoder_model.keras')
             if os.path.exists(autoencoder_path):
                 try:
                     # Define custom objects to handle 'mse' and other metrics
@@ -245,7 +245,33 @@ def preprocess_data(data):
             for feature in feature_names:
                 if feature not in df.columns:
                     print(f"Adding missing feature: {feature}")
-                    df[feature] = 0  # Default value for missing features
+                    # Handle each missing feature with appropriate logic
+                    if feature == 'transaction_frequency':
+                        # Calculate transaction_frequency from time_since_last_transaction if available
+                        if 'time_since_last_transaction' in df.columns:
+                            # Convert to transactions per day (86400 seconds in a day)
+                            df['transaction_frequency'] = np.where(
+                                df['time_since_last_transaction'] > 0,
+                                86400 / df['time_since_last_transaction'],
+                                1.0  # Default value for first transaction
+                            )
+                            print("Created 'transaction_frequency' feature from 'time_since_last_transaction'")
+                        else:
+                            # If no time data available, use a default value
+                            df['transaction_frequency'] = 1.0
+                            print("Added 'transaction_frequency' with default value of 1.0")
+                    elif feature == 'amount_log' and 'amount' in df.columns:
+                        # Calculate log of amount
+                        df['amount_log'] = np.log1p(df['amount'])
+                        print("Created 'amount_log' feature from 'amount'")
+                    elif feature == 'velocity_score_norm' and 'velocity_score' in df.columns:
+                        # Normalize velocity score
+                        df['velocity_score_norm'] = df['velocity_score'] / 100.0
+                        print("Created 'velocity_score_norm' feature from 'velocity_score'")
+                    else:
+                        # For other features, use zero as default
+                        df[feature] = 0.0
+                        print(f"Added '{feature}' with default value of 0.0")
             
             # Select and order features according to feature_names
             df = df[feature_names]

@@ -246,7 +246,7 @@ def run_model_evaluation(config, model_type='both', disable_gpu=False, single_gp
         memory_growth (bool): Enable memory growth for GPUs
     """
     test_data_path = config.get('data', {}).get('test_path', 'data/processed/test_data.parquet')
-    model_dir = config.get('models', {}).get('model_dir', 'models')
+    model_dir = config.get('models', {}).get('output_dir', 'results/models')
     results_dir = config.get('evaluation', {}).get('output_dir', 'results')
     
     # Ensure directories exist
@@ -262,8 +262,21 @@ def run_model_evaluation(config, model_type='both', disable_gpu=False, single_gp
         gpu_flags += " --memory-growth"
     
     if model_type in ['classification', 'both']:
-        model_path = os.path.join(model_dir, 'classification_model.h5')
-        if os.path.exists(model_path):
+        # Try to find the most recent model file of either format (excluding JSON files)
+        classification_models = [f for f in os.listdir(model_dir) 
+                               if (f.endswith('.keras') or f.endswith('.h5')) and 
+                               (f.startswith('classification_model') or 
+                               (f.startswith('fraud_detection_') and not f.startswith('fraud_detection_autoencoder_')))]
+        
+        if not classification_models:
+            logger.warning(f"No classification models found in {model_dir}")
+            print(f"⚠️ No classification models found in {model_dir}")
+        else:
+            # Sort by modification time (newest first)
+            classification_models.sort(key=lambda x: os.path.getmtime(os.path.join(model_dir, x)), reverse=True)
+            model_path = os.path.join(model_dir, classification_models[0])
+            logger.info(f"Using most recent classification model: {model_path}")
+            print(f"Using most recent classification model: {os.path.basename(model_path)}")
             command = (
                 f"python src/models/evaluate_model.py "
                 f"--model-path {model_path} "
@@ -272,11 +285,25 @@ def run_model_evaluation(config, model_type='both', disable_gpu=False, single_gp
                 f"--output-dir {results_dir}"
                 f"{gpu_flags}"
             )
+            print(f"\nEvaluating classification model...")
             run_command(command)
     
     if model_type in ['autoencoder', 'both']:
-        model_path = os.path.join(model_dir, 'autoencoder_model.h5')
-        if os.path.exists(model_path):
+        # Try to find the most recent model file of either format (excluding JSON files)
+        autoencoder_models = [f for f in os.listdir(model_dir) 
+                            if (f.endswith('.keras') or f.endswith('.h5')) and
+                            (f.startswith('autoencoder_model') or 
+                            f.startswith('fraud_detection_autoencoder_'))]
+        
+        if not autoencoder_models:
+            logger.warning(f"No autoencoder models found in {model_dir}")
+            print(f"⚠️ No autoencoder models found in {model_dir}")
+        else:
+            # Sort by modification time (newest first)
+            autoencoder_models.sort(key=lambda x: os.path.getmtime(os.path.join(model_dir, x)), reverse=True)
+            model_path = os.path.join(model_dir, autoencoder_models[0])
+            logger.info(f"Using most recent autoencoder model: {model_path}")
+            print(f"Using most recent autoencoder model: {os.path.basename(model_path)}")
             command = (
                 f"python src/models/evaluate_model.py "
                 f"--model-path {model_path} "
@@ -285,6 +312,7 @@ def run_model_evaluation(config, model_type='both', disable_gpu=False, single_gp
                 f"--output-dir {results_dir}"
                 f"{gpu_flags}"
             )
+            print(f"\nEvaluating autoencoder model...")
             run_command(command)
 
 def deploy_model(config, disable_gpu=False, single_gpu=False, memory_growth=False):

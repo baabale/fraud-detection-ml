@@ -204,10 +204,36 @@ def load_test_data(file_path, model_path=None):
     missing_features = [f for f in core_features if f not in df.columns]
     if missing_features:
         print(f"Warning: Missing features in test data: {missing_features}")
-        print("Adding missing features with default values (zeros)")
-        # Add missing features with default values
+        print("Adding missing features with intelligent defaults")
+        
+        # Handle each missing feature with appropriate logic
         for feature in missing_features:
-            df[feature] = 0.0
+            if feature == 'transaction_frequency':
+                # Calculate transaction_frequency from time_since_last_transaction if available
+                if 'time_since_last_transaction' in df.columns:
+                    # Convert to transactions per day (86400 seconds in a day)
+                    df['transaction_frequency'] = np.where(
+                        df['time_since_last_transaction'] > 0,
+                        86400 / df['time_since_last_transaction'],
+                        1.0  # Default value for first transaction
+                    )
+                    print("Created 'transaction_frequency' feature from 'time_since_last_transaction'")
+                else:
+                    # If no time data available, use a default value
+                    df['transaction_frequency'] = 1.0
+                    print("Added 'transaction_frequency' with default value of 1.0")
+            elif feature == 'amount_log' and 'amount' in df.columns:
+                # Calculate log of amount
+                df['amount_log'] = np.log1p(df['amount'])
+                print("Created 'amount_log' feature from 'amount'")
+            elif feature == 'velocity_score_norm' and 'velocity_score' in df.columns:
+                # Normalize velocity score
+                df['velocity_score_norm'] = df['velocity_score'] / 100.0
+                print("Created 'velocity_score_norm' feature from 'velocity_score'")
+            else:
+                # For other features, use zero as default
+                df[feature] = 0.0
+                print(f"Added '{feature}' with default value of 0.0")
     
     print(f"Using {len(core_features)} numeric features: {core_features}")
     
