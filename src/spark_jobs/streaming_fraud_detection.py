@@ -63,7 +63,7 @@ from src.utils.config_manager import config
 
 def create_spark_session(app_name=None, gpu_available=None, multi_gpu=True):
     """
-    Create and return a Spark session configured for streaming.
+    Create and return a Spark session configured for streaming, optimized for Apple M2 chip.
     
     Args:
         app_name (str, optional): Name of the Spark application. If None, uses the value from config.
@@ -76,8 +76,10 @@ def create_spark_session(app_name=None, gpu_available=None, multi_gpu=True):
     # Get Spark configuration from config
     spark_config = config.get_spark_config()
     app_name = app_name or spark_config.get('app_name', 'FraudDetectionStreaming')
-    driver_memory = spark_config.get('driver_memory', '4g')
-    executor_memory = spark_config.get('executor_memory', '4g')
+    
+    # Override with optimized memory settings for M2 with 24GB RAM
+    driver_memory = "16g"  # Optimized for M2 with 24GB
+    executor_memory = "16g"  # Optimized for M2 with 24GB
     
     # Auto-detect GPU availability if not explicitly provided
     if gpu_available is None:
@@ -92,49 +94,64 @@ def create_spark_session(app_name=None, gpu_available=None, multi_gpu=True):
     # Start building the Spark session
     builder = SparkSession.builder.appName(app_name)
     
-    # Configure basic Spark settings
+    # Configure basic Spark settings optimized for M2
     builder = builder.config("spark.streaming.stopGracefullyOnShutdown", "true")
     builder = builder.config("spark.driver.memory", driver_memory)
     builder = builder.config("spark.executor.memory", executor_memory)
+    builder = builder.config("spark.driver.cores", "8")
+    builder = builder.config("spark.executor.cores", "8")
+    builder = builder.config("spark.default.parallelism", "16")
+    builder = builder.config("spark.sql.shuffle.partitions", "16")
+    
+    # Streaming-specific optimizations
+    builder = builder.config("spark.streaming.backpressure.enabled", "true")
+    builder = builder.config("spark.streaming.kafka.maxRatePerPartition", "10000")
+    builder = builder.config("spark.streaming.receiver.writeAheadLog.enable", "true")
+    
+    # Apple Silicon optimizations
+    builder = builder.config("spark.driver.extraJavaOptions", "-Duser.timezone=UTC -XX:+UseG1GC")
+    builder = builder.config("spark.executor.extraJavaOptions", "-Duser.timezone=UTC -XX:+UseG1GC")
+    builder = builder.config("spark.sql.execution.arrow.pyspark.enabled", "true")
+    builder = builder.config("spark.sql.execution.arrow.maxRecordsPerBatch", "500000")
+    builder = builder.config("spark.sql.adaptive.enabled", "true")
+    builder = builder.config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+    builder = builder.config("spark.memory.fraction", "0.8")
+    builder = builder.config("spark.memory.storageFraction", "0.3")
     
     # Configure GPU acceleration if available
     if gpu_available:
         print("\n" + "="*70)
-        print(f"🚀 CONFIGURING SPARK STREAMING FOR GPU ACCELERATION")
+        print(f"🚀 CONFIGURING SPARK STREAMING FOR APPLE M2 GPU ACCELERATION")
         print("="*70 + "\n")
         
-        # Enable GPU acceleration for Spark
-        builder = builder.config("spark.rapids.sql.enabled", "true")
-        builder = builder.config("spark.rapids.memory.pinnedPool.size", "2G")
-        builder = builder.config("spark.sql.execution.arrow.pyspark.enabled", "true")
-        builder = builder.config("spark.sql.execution.arrow.maxRecordsPerBatch", "500000")
-        
-        # Configure for multi-GPU if requested and available
-        if multi_gpu:
-            try:
-                import tensorflow as tf
-                gpus = tf.config.list_physical_devices('GPU')
-                if len(gpus) > 1:
-                    print(f"Configuring Spark for {len(gpus)} GPUs...")
-                    # Set concurrent tasks based on GPU count
-                    builder = builder.config("spark.rapids.sql.concurrentGpuTasks", str(len(gpus)))
-                    builder = builder.config("spark.rapids.sql.explain", "ALL")
-                    builder = builder.config("spark.rapids.memory.gpu.pooling.enabled", "true")
-                    builder = builder.config("spark.rapids.sql.multiThreadedRead.numThreads", str(len(gpus) * 2))
-                else:
-                    print("Only one GPU detected. Using single-GPU configuration.")
-                    builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2")
-                    builder = builder.config("spark.rapids.sql.explain", "ALL")
-            except ImportError:
-                # Fall back to default GPU settings if TensorFlow is not available
+        # Check for Apple Metal GPU
+        try:
+            import tensorflow as tf
+            # Check if Metal plugin is available
+            metal_available = any('Metal' in device.physical_device_desc 
+                                for device in tf.config.list_physical_devices('GPU'))
+            
+            if metal_available:
+                print("Apple Metal GPU detected. Configuring optimized streaming settings.")
+                # Configure for Apple Metal GPU
+                builder = builder.config("spark.sql.execution.arrow.pyspark.enabled", "true")
+                builder = builder.config("spark.sql.execution.arrow.maxRecordsPerBatch", "500000")
+                
+                # Streaming specific Metal optimizations
+                builder = builder.config("spark.streaming.concurrentJobs", "4")
+                builder = builder.config("spark.streaming.blockInterval", "200ms")
+            else:
+                print("Using standard GPU configuration")
+                # Standard GPU config
+                builder = builder.config("spark.rapids.sql.enabled", "true")
+                builder = builder.config("spark.rapids.memory.pinnedPool.size", "8G")
                 builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2")
                 builder = builder.config("spark.rapids.sql.explain", "ALL")
-        else:
-            # Single GPU configuration
-            builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2")
-            builder = builder.config("spark.rapids.sql.explain", "ALL")
+        except Exception as e:
+            print(f"Error configuring GPU acceleration: {str(e)}")
+            print("Falling back to CPU configuration with optimized settings")
     else:
-        print("Using CPU-only configuration for Spark")
+        print("Using CPU-only configuration for Spark with optimized settings for Apple M2")
     
     # Create and return the session
     return builder.getOrCreate()

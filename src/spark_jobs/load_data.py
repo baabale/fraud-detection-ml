@@ -61,15 +61,15 @@ except ImportError:
     logger.warning("TensorFlow not available. GPU acceleration not configured for data processing.")
 
 
-def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=None, multi_gpu=False, gpu_memory="2G"):
+def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=None, multi_gpu=False, gpu_memory="8G"):
     """
-    Create and return a Spark session.
+    Create and return a Spark session optimized for Apple M2 chip.
     
     Args:
         app_name (str): Name of the Spark application
         gpu_available (bool, optional): Whether GPU is available. If None, will be auto-detected.
         multi_gpu (bool): Whether to configure for multiple GPUs
-        gpu_memory (str): Amount of GPU memory to allocate (e.g., "2G")
+        gpu_memory (str): Amount of GPU memory to allocate (e.g., "8G")
         
     Returns:
         SparkSession: Configured Spark session
@@ -87,50 +87,55 @@ def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=N
     # Start building the Spark session
     builder = SparkSession.builder.appName(app_name)
     
-    # Configure memory
-    builder = builder.config("spark.driver.memory", "4g") \
-                   .config("spark.executor.memory", "4g")
+    # Configure memory - optimized for M2 with 24GB RAM
+    builder = builder.config("spark.driver.memory", "16g") \
+                   .config("spark.executor.memory", "16g") \
+                   .config("spark.driver.cores", "8") \
+                   .config("spark.executor.cores", "8") \
+                   .config("spark.default.parallelism", "16") \
+                   .config("spark.sql.shuffle.partitions", "16")
+    
+    # Configure for Apple Silicon optimization
+    builder = builder.config("spark.driver.extraJavaOptions", "-Duser.timezone=UTC -XX:+UseG1GC") \
+                   .config("spark.executor.extraJavaOptions", "-Duser.timezone=UTC -XX:+UseG1GC") \
+                   .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+                   .config("spark.sql.execution.arrow.maxRecordsPerBatch", "500000")
     
     # Configure GPU acceleration if available
     if gpu_available:
         # Get a logger
         logger = logging.getLogger('fraud_detection')
         
-        gpu_message = f"\n{'='*70}\n🚀 CONFIGURING SPARK FOR GPU ACCELERATION\n{'='*70}\n"
+        gpu_message = f"\n{'='*70}\n🚀 CONFIGURING SPARK FOR APPLE M2 GPU ACCELERATION\n{'='*70}\n"
         logger.info(gpu_message)
         
-        # Enable GPU acceleration for Spark
-        builder = builder.config("spark.rapids.sql.enabled", "true") \
-                       .config("spark.rapids.memory.pinnedPool.size", gpu_memory) \
-                       .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
-                       .config("spark.sql.execution.arrow.maxRecordsPerBatch", "500000")
-        
-        # Configure for multi-GPU if requested and available
-        if multi_gpu:
-            try:
-                import tensorflow as tf
-                gpus = tf.config.list_physical_devices('GPU')
-                if len(gpus) > 1:
-                    logger.info(f"Configuring Spark for {len(gpus)} GPUs...")
-                    # Set concurrent tasks based on GPU count
-                    builder = builder.config("spark.rapids.sql.concurrentGpuTasks", str(len(gpus))) \
-                               .config("spark.rapids.sql.explain", "ALL") \
-                               .config("spark.rapids.memory.gpu.pooling.enabled", "true") \
-                               .config("spark.rapids.sql.multiThreadedRead.numThreads", str(len(gpus) * 2))
-                else:
-                    print("Only one GPU detected. Using single-GPU configuration.")
-                    builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2") \
+        # Enable Metal GPU acceleration for Apple Silicon
+        try:
+            import tensorflow as tf
+            # Check if Metal plugin is available
+            metal_available = any('Metal' in device.physical_device_desc for device in tf.config.list_physical_devices('GPU'))
+            
+            if metal_available:
+                logger.info("Apple Metal GPU detected. Configuring optimized settings.")
+                # Configure for Apple Metal GPU
+                builder = builder.config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+                               .config("spark.sql.execution.arrow.maxRecordsPerBatch", "500000") \
+                               .config("spark.sql.adaptive.enabled", "true") \
+                               .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+                               .config("spark.memory.fraction", "0.8") \
+                               .config("spark.memory.storageFraction", "0.3")
+            else:
+                logger.info("Using standard GPU configuration")
+                # Standard GPU config
+                builder = builder.config("spark.rapids.sql.enabled", "true") \
+                               .config("spark.rapids.memory.pinnedPool.size", gpu_memory) \
+                               .config("spark.rapids.sql.concurrentGpuTasks", "2") \
                                .config("spark.rapids.sql.explain", "ALL")
-            except ImportError:
-                # Fall back to default GPU settings if TensorFlow is not available
-                builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2") \
-                           .config("spark.rapids.sql.explain", "ALL")
-        else:
-            # Single GPU configuration
-            builder = builder.config("spark.rapids.sql.concurrentGpuTasks", "2") \
-                           .config("spark.rapids.sql.explain", "ALL")
+        except Exception as e:
+            logger.warning(f"Error configuring GPU acceleration: {str(e)}")
+            logger.info("Falling back to CPU configuration with optimized settings")
     else:
-        print("Using CPU-only configuration for Spark")
+        logger.info("Using CPU-only configuration for Spark with optimized settings for Apple M2")
     
     # Create and return the session
     return builder.getOrCreate()

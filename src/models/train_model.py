@@ -537,7 +537,8 @@ def evaluate_classification_model(model, X_test, y_test):
         dict: Dictionary of evaluation metrics
     """
     # Predictions
-    y_pred_proba = model.predict(X_test)
+    with tf.device('/GPU:0'):
+        y_pred_proba = model.predict(X_test)
     y_pred = (y_pred_proba > 0.5).astype(int).flatten()
     
     # Check for class distribution in test data
@@ -590,7 +591,8 @@ def compute_anomaly_scores(model, X):
         numpy.ndarray: Array of anomaly scores
     """
     # Get reconstructions
-    X_pred = model.predict(X)
+    with tf.device('/GPU:0'):
+        X_pred = model.predict(X)
     
     # Compute reconstruction error (MSE) for each sample
     mse = np.mean(np.square(X - X_pred), axis=1)
@@ -611,7 +613,8 @@ def evaluate_autoencoder_model(model, X_test, y_test, threshold=None):
         dict: Dictionary of evaluation metrics
     """
     # Compute anomaly scores
-    anomaly_scores = compute_anomaly_scores(model, X_test)
+    with tf.device('/GPU:0'):
+        anomaly_scores = compute_anomaly_scores(model, X_test)
     
     # Determine threshold if not provided
     if threshold is None:
@@ -793,16 +796,17 @@ def train_classification_model(X_train, y_train, X_val, y_val, input_dim, hidden
             verbose=1
         )
     else:
-        # Standard training for single GPU
-        history = model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=epochs,
-            batch_size=batch_size,
-            callbacks=callbacks,
-            class_weight=class_weight,
-            verbose=1
-        )
+        # Single-GPU or CPU training
+        with tf.device('/GPU:0'):
+            history = model.fit(
+                X_train, y_train,
+                validation_data=(X_val, y_val),
+                epochs=epochs,
+                batch_size=batch_size,
+                callbacks=callbacks,
+                class_weight=class_weight,
+                verbose=1
+            )
     
     return model, history
 
@@ -1077,15 +1081,16 @@ def train_autoencoder_model(X_train, X_val, input_dim, batch_size=256, epochs=20
             verbose=1
         )
     else:
-        # Standard training for single GPU
-        history = model.fit(
-            X_train, X_train,  # Autoencoder trains to reconstruct input
-            validation_data=(X_val, X_val),
-            epochs=epochs,
-            batch_size=batch_size,
-            callbacks=callbacks,
-            verbose=1
-        )
+       # Single-GPU or CPU training
+        with tf.device('/GPU:0'):
+            history = model.fit(
+                X_train, X_train,  # Autoencoder trains to reconstruct input
+                validation_data=(X_val, X_val),
+                epochs=epochs,
+                batch_size=batch_size,
+                callbacks=callbacks,
+                verbose=1
+            )
     
     return model, history
 
