@@ -2,7 +2,9 @@
 
 # Data paths
 data:
-  raw_path: "data/raw/sample_dataset_small.csv"
+  # raw_path: "data/raw/financial_fraud_detection_dataset.csv"
+  # raw_path: "data/raw/sample_dataset_small.csv"
+  raw_path: "data/raw/balanced_dataset.csv"
   processed_path: "data/processed/transactions.parquet"
   test_path: "data/processed/test_data.parquet"  # Will be created during data processing
 
@@ -20,9 +22,9 @@ models:
   
   # Advanced sampling parameters
   sampling:
-    technique: "borderline_smote"       # Better for focusing on boundary cases
-    ratio: 0.5                          # More balanced ratio to prevent overfitting
-    k_neighbors: 7                      # More neighbors for robust synthetic samples
+    technique: "none"                  # Disabled sampling since dataset is already manually balanced (33% fraud)
+    ratio: 0.5                          # Preserved but not used when technique is none
+    k_neighbors: 7                      # Preserved but not used when technique is none
   
   # Custom loss function parameters
   loss_function:
@@ -53,6 +55,8 @@ mlflow:
 # Spark configurations
 spark:
   app_name: "FraudDetectionPipeline"
-  driver_memory: "4g"
-  executor_memory: "4g"
-  max_result_size: "2g"
+  driver_memory: "18g"  # Optimized for Apple M2 with 24GB RAM
+  executor_memory: "18g"  # Optimized for Apple M2 with 24GB RAM
+  max_result_size: "4g"
+  num_partitions: 32  # Optimized for Apple M2 8-core CPU
+  compression: "snappy"  # Use Snappy compression for better performance

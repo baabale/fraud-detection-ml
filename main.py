@@ -116,11 +116,16 @@ def run_command(command):
                         logger.error(line)
                         print(line, file=sys.stderr, flush=True)
                 else:
-                    # Check if this is a log line from a subprocess
+                    # Check if this is a log line from a subprocess or training progress message
                     if line.startswith(('20', '19')) and (' - ' in line):
                         # This is already a formatted log line, just print it without re-logging
                         print(line, flush=True)
+                    # Check for training progress messages with the time format [X.Xs]
+                    elif line.startswith('[') and ']' in line and 'Training in progress' in line:
+                        # This is a training progress message, just print it without re-logging
+                        print(line, flush=True)
                     else:
+                        # Only regular output should be logged
                         logger.info(line)
                         print(line, flush=True)
             except queue.Empty:
@@ -207,17 +212,96 @@ def run_model_training(config, model_type='both', disable_gpu=False, single_gpu=
         memory_growth (bool): Enable memory growth for GPUs
     """
     processed_data_path = config.get('data', {}).get('processed_path', 'data/processed/transactions.parquet')
-    model_dir = config.get('models', {}).get('model_dir', 'models')
+    model_dir = config.get('models', {}).get('output_dir', 'results/models')
+    
+    # Extract MLflow configuration
+    mlflow_config = config.get('mlflow', {})
+    experiment_name = mlflow_config.get('experiment_name', 'Fraud_Detection_Experiment')
+    mlflow_tracking_uri = mlflow_config.get('tracking_uri', '')
+    
+    # Check MLflow server connection if a URI is provided
+    use_mlflow = True
+    if mlflow_tracking_uri and mlflow_tracking_uri.startswith('http'):
+        import socket
+        import urllib.parse
+        try:
+            # Parse the URI to get host and port
+            parsed_uri = urllib.parse.urlparse(mlflow_tracking_uri)
+            host = parsed_uri.hostname
+            port = parsed_uri.port or 80
+            
+            # Try to connect to check if the server is running
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(2.0)  # 2 second timeout
+                result = s.connect_ex((host, port))
+                if result != 0:
+                    print(f"\n⚠️ Warning: MLflow tracking server at {mlflow_tracking_uri} appears to be unavailable.")
+                    mlflow_option = input("Select an option:\n1. Continue without MLflow tracking\n2. Use local directory for tracking\n3. Cancel training\nChoice (1-3): ")
+                    
+                    if mlflow_option == '1':
+                        use_mlflow = False
+                        print("👉 Continuing without MLflow experiment tracking")
+                    elif mlflow_option == '2':
+                        local_dir = os.path.join(os.getcwd(), 'mlruns')
+                        os.environ['MLFLOW_TRACKING_URI'] = f"file://{local_dir}"
+                        print(f"👉 Using local directory for MLflow tracking: {local_dir}")
+                    else:  # Option 3 or any other input
+                        print("❌ Training cancelled")
+                        return 1
+        except Exception as e:
+            logger.warning(f"Error checking MLflow server: {str(e)}")
+            print(f"\n⚠️ Warning: Could not verify MLflow server status. Error: {str(e)}")
+            use_mlflow_input = input("Continue with MLflow tracking anyway? (y/[n]): ")
+            use_mlflow = use_mlflow_input.lower() == 'y'
+    
+    # Extract model configuration parameters
+    class_config = config.get('models', {}).get('classification', {})
+    l2_regularization = class_config.get('l2_regularization', 0.001)
+    
+    # Extract sampling parameters
+    sampling_config = config.get('models', {}).get('sampling', {})
+    sampling_technique = sampling_config.get('technique', 'none')
+    sampling_ratio = sampling_config.get('ratio', 0.5)
+    k_neighbors = sampling_config.get('k_neighbors', 7)
+    
+    # Extract loss function parameters
+    loss_config = config.get('models', {}).get('loss_function', {})
+    loss_function = loss_config.get('name', 'binary_crossentropy')
+    focal_gamma = loss_config.get('focal_gamma', 4.0)
+    focal_alpha = loss_config.get('focal_alpha', 0.3)
+    class_weight_ratio = loss_config.get('class_weight_ratio', 5.0)
+    
+    # Use provided batch_size_multiplier or default to 1
+    if batch_size_multiplier is None:
+        batch_size_multiplier = 4  # Default to 4 as seen in your command
     
     # Ensure directories exist
     os.makedirs(model_dir, exist_ok=True)
     
-    # Set up MLflow tracking if configured
-    mlflow_tracking_uri = config.get('mlflow', {}).get('tracking_uri', '')
-    if mlflow_tracking_uri:
+    # Set up MLflow tracking if configured and available
+    if mlflow_tracking_uri and use_mlflow:
         os.environ['MLFLOW_TRACKING_URI'] = mlflow_tracking_uri
     
+    # Build the base command with data path, model directory and type
     command = f"python src/models/train_model.py --data-path {processed_data_path} --model-dir {model_dir} --model-type {model_type}"
+    
+    # Add experiment name for MLflow tracking (only if using MLflow)
+    if use_mlflow:
+        command += f" --experiment-name {experiment_name}"
+    else:
+        command += " --no-mlflow"  # Add a flag to disable MLflow in the script
+    
+    # Add sampling parameters
+    command += f" --sampling-technique {sampling_technique} --sampling-ratio {sampling_ratio} --k-neighbors {k_neighbors}"
+    
+    # Add loss function parameters
+    command += f" --loss-function {loss_function} --focal-gamma {focal_gamma} --focal-alpha {focal_alpha} --class-weight-ratio {class_weight_ratio}"
+    
+    # Add regularization parameter
+    command += f" --l2-regularization {l2_regularization}"
+    
+    # Add batch size multiplier
+    command += f" --batch-size-multiplier {batch_size_multiplier}"
     
     # Add GPU configuration flags
     if disable_gpu:
@@ -225,12 +309,9 @@ def run_model_training(config, model_type='both', disable_gpu=False, single_gpu=
     elif single_gpu:
         command += " --single-gpu"
     
-    # Add optional GPU configuration parameters
-    if batch_size_multiplier is not None:
-        command += f" --batch-size-multiplier {batch_size_multiplier}"
-    
-    if memory_growth:
-        command += " --memory-growth"
+    # Add memory growth parameter with a proper boolean value
+    memory_growth_value = "true" if memory_growth else "false"
+    command += f" --memory-growth {memory_growth_value}"
     
     return run_command(command)
 
@@ -547,7 +628,7 @@ def main():
                 print(f"\nGPU Configuration:")
                 disable_gpu = input(f"Disable GPU acceleration? (y/[n]): ").lower() == 'y'
                 single_gpu = False if disable_gpu else (input(f"Use only a single GPU? ({num_gpus} available) (y/[n]): ").lower() == 'y' if num_gpus > 1 else False)
-                memory_growth = False if disable_gpu else (input(f"Enable memory growth for GPUs? (y/[n]): ").lower() == 'y')
+                memory_growth = False if disable_gpu else (input(f"Enable memory growth for GPUs? ([y]/n): ").lower() != 'n')
                 
                 if not disable_gpu:
                     print(f"\n🚀 Running with {'single GPU' if single_gpu else 'all GPUs'} acceleration")
@@ -585,7 +666,7 @@ def main():
                 print(f"\nGPU Configuration:")
                 disable_gpu = input(f"Disable GPU acceleration? (y/[n]): ").lower() == 'y'
                 single_gpu = False if disable_gpu else (input(f"Use only a single GPU? ({num_gpus} available) (y/[n]): ").lower() == 'y' if num_gpus > 1 else False)
-                memory_growth = False if disable_gpu else (input(f"Enable memory growth for GPUs? (y/[n]): ").lower() == 'y')
+                memory_growth = False if disable_gpu else (input(f"Enable memory growth for GPUs? ([y]/n): ").lower() != 'n')
                 
                 # Advanced GPU options for training
                 batch_size_multiplier = None
@@ -619,7 +700,7 @@ def main():
                 print(f"\nGPU Configuration:")
                 disable_gpu = input(f"Disable GPU acceleration? (y/[n]): ").lower() == 'y'
                 single_gpu = False if disable_gpu else (input(f"Use only a single GPU? ({num_gpus} available) (y/[n]): ").lower() == 'y' if num_gpus > 1 else False)
-                memory_growth = False if disable_gpu else (input(f"Enable memory growth for GPUs? (y/[n]): ").lower() == 'y')
+                memory_growth = False if disable_gpu else (input(f"Enable memory growth for GPUs? ([y]/n): ").lower() != 'n')
                 
                 if not disable_gpu:
                     print(f"\n🚀 Evaluating with {'single GPU' if single_gpu else 'all GPUs'} acceleration")
@@ -638,7 +719,7 @@ def main():
                 print(f"\nGPU Configuration:")
                 disable_gpu = input(f"Disable GPU acceleration? (y/[n]): ").lower() == 'y'
                 single_gpu = False if disable_gpu else (input(f"Use only a single GPU? ({num_gpus} available) (y/[n]): ").lower() == 'y' if num_gpus > 1 else False)
-                memory_growth = False if disable_gpu else (input(f"Enable memory growth for GPUs? (y/[n]): ").lower() == 'y')
+                memory_growth = False if disable_gpu else (input(f"Enable memory growth for GPUs? ([y]/n): ").lower() != 'n')
                 
                 if not disable_gpu:
                     print(f"\n🚀 Deploying with {'single GPU' if single_gpu else 'all GPUs'} acceleration")
@@ -657,7 +738,7 @@ def main():
                 print(f"\nGPU Configuration:")
                 disable_gpu = input(f"Disable GPU acceleration? (y/[n]): ").lower() == 'y'
                 single_gpu = False if disable_gpu else (input(f"Use only a single GPU? ({num_gpus} available) (y/[n]): ").lower() == 'y' if num_gpus > 1 else False)
-                memory_growth = False if disable_gpu else (input(f"Enable memory growth for GPUs? (y/[n]): ").lower() == 'y')
+                memory_growth = False if disable_gpu else (input(f"Enable memory growth for GPUs? ([y]/n): ").lower() != 'n')
                 
                 if not disable_gpu:
                     print(f"\n🚀 Running streaming with {'single GPU' if single_gpu else 'all GPUs'} acceleration")

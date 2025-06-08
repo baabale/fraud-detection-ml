@@ -1,0 +1,65 @@
+# Production Configuration for Fraud Detection Pipeline
+
+# Data paths
+data:
+  raw_path: "/app/data/raw/financial_fraud_detection_dataset.csv"
+  processed_path: "/app/data/processed/transactions.parquet"
+  test_path: "/app/data/processed/test_data.parquet"
+
+# Model configurations
+models:
+  output_dir: "/app/results/models"
+  
+  # Classification model parameters
+  classification:
+    hidden_layers: [256, 128, 64]
+    dropout_rate: 0.5
+    batch_size: 512
+    epochs: 20
+  
+  # Autoencoder model parameters
+  autoencoder:
+    hidden_layers: [128, 64]
+    encoding_dim: 32
+    batch_size: 512
+    epochs: 30
+
+# Evaluation configurations
+evaluation:
+  output_dir: "/app/results"
+  threshold: null  # If null, will be determined automatically
+  percentile: 95   # For autoencoder threshold determination
+
+# MLflow configurations
+mlflow:
+  experiment_name: "Fraud_Detection_Production"
+  tracking_uri: "http://mlflow:5001"
+  
+# Spark configurations
+spark:
+  app_name: "FraudDetectionPipeline_Production"
+  driver_memory: "8g"
+  executor_memory: "8g"
+  max_result_size: "4g"
+  checkpoint_dir: "/app/checkpoints"
+
+# Monitoring configurations
+monitoring:
+  enable: true
+  metrics_endpoint: "/metrics"
+  model_drift_threshold: 0.1
+  data_drift_threshold: 0.2
+  alert_email: "alerts@yourcompany.com"
+
+# Logging configurations
+logging:
+  level: "INFO"
+  file: "/app/logs/fraud_detection.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+# API configurations
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  timeout: 120

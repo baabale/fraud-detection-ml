@@ -60,46 +60,65 @@ def run_command(command, description):
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        bufsize=1,
         universal_newlines=True,
-        bufsize=0,  # Unbuffered output
         env=env
     )
     
-    # Use a separate thread for each stream to avoid blocking
-    import threading
+    # Use queue to handle output in a thread-safe way
     import queue
-    import sys
+    import threading
+    q = queue.Queue()
     
     def enqueue_output(stream, queue_obj, is_error=False):
         for line in iter(stream.readline, ''):
             queue_obj.put((line.strip(), is_error))
         stream.close()
     
-    q = queue.Queue()
-    stdout_thread = threading.Thread(target=enqueue_output, args=(process.stdout, q))
-    stderr_thread = threading.Thread(target=enqueue_output, args=(process.stderr, q, True))
-    stdout_thread.daemon = True
-    stderr_thread.daemon = True
+    # Start threads to enqueue output
+    stdout_thread = threading.Thread(
+        target=enqueue_output,
+        args=(process.stdout, q),
+        daemon=True
+    )
+    stderr_thread = threading.Thread(
+        target=enqueue_output,
+        args=(process.stderr, q, True),
+        daemon=True
+    )
     stdout_thread.start()
     stderr_thread.start()
     
-    # Read from queue and log in real-time
-    while stdout_thread.is_alive() or stderr_thread.is_alive() or not q.empty():
+    # Read from queue and log output
+    while True:
         try:
             line, is_error = q.get(timeout=0.1)
-            if is_error:
-                # Check if this is a log line from a subprocess
-                if line.startswith(('20', '19')) and (' - ' in line):
-                    # This is already a formatted log line, just print it without re-logging
-                    print(line, file=sys.stderr, flush=True)
-                else:
+            if line:
+                # Check if this is a Spark progress indicator or TensorFlow initialization message
+                if is_error and (
+                    line.strip().startswith('[Stage') or 
+                    'SparkStringUtils' in line or
+                    'metal_plugin' in line or
+                    'systemMemory:' in line or
+                    'maxCacheSize:' in line or
+                    'WARNING: All log messages before absl::InitializeLog()' in line or
+                    'pluggable_device_factory' in line or
+                    'Metal device set to:' in line or
+                    'Created TensorFlow device' in line or
+                    line.startswith('WARNING:') or
+                    line.startswith('WARN ') or
+                    'Using Spark' in line or
+                    'Your hostname' in line or
+                    'Set SPARK_LOCAL_IP' in line or
+                    'Using incubator modules' in line or
+                    'Unable to load native-hadoop library' in line or
+                    'Setting default log level' in line or
+                    'To adjust logging level' in line
+                ):
+                    # Log these messages at INFO level instead of ERROR
+                    logger.info(line)
+                elif is_error:
                     logger.error(line)
-                    print(line, file=sys.stderr, flush=True)
-            else:
-                # Check if this is a log line from a subprocess
-                if line.startswith(('20', '19')) and (' - ' in line):
-                    # This is already a formatted log line, just print it without re-logging
-                    print(line, flush=True)
                 else:
                     logger.info(line)
                     print(line, flush=True)
@@ -151,8 +170,15 @@ def run_data_processing(config):
     # Ensure directories exist
     os.makedirs(os.path.dirname(processed_data_path), exist_ok=True)
     
-    # Build command
-    command = f"python src/spark_jobs/load_data.py --input {raw_data_path} --output {processed_data_path}"
+    # Get Spark configuration from config or use defaults
+    spark_config = config.get('spark', {})
+    num_partitions = spark_config.get('num_partitions', 32)
+    driver_memory = spark_config.get('driver_memory', '18g')
+    executor_memory = spark_config.get('executor_memory', '18g')
+    
+    # Build command with additional parameters
+    command = f"python src/spark_jobs/load_data.py --input {raw_data_path} --output {processed_data_path} "
+    command += f"--num-partitions {num_partitions} --driver-memory {driver_memory} --executor-memory {executor_memory}"
     
     # Run command
     return_code = run_command(command, "Data Processing")
@@ -354,8 +380,8 @@ def main():
                         help='Disable GPU usage even if available')
     parser.add_argument('--single-gpu', action='store_true',
                         help='Use only a single GPU even if multiple are available')
-    parser.add_argument('--batch-size-multiplier', type=int, default=2,
-                        help='Multiplier for batch size when using multiple GPUs')
+    parser.add_argument('--batch-size-multiplier', type=int, default=4,
+                        help='Multiplier for batch size when using Apple M2 GPU or multiple GPUs')
     parser.add_argument('--memory-growth', action='store_true',
                         help='Enable memory growth for GPUs to prevent TensorFlow from allocating all memory')
     

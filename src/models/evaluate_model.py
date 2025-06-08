@@ -1080,17 +1080,45 @@ def main():
                         help='Use only a single GPU even if multiple are available')
     parser.add_argument('--memory-growth', action='store_true',
                         help='Enable memory growth for GPUs to prevent TensorFlow from allocating all memory')
+    parser.add_argument('--no-mlflow', action='store_true',
+                        help='Disable MLflow tracking')
+    parser.add_argument('--mlflow-tracking-uri', type=str, default=None,
+                        help='MLflow tracking server URI')
     args = parser.parse_args()
     
-    # Set up MLflow
-    mlflow.set_experiment("Fraud_Detection_Evaluation")
+    # Set up MLflow if not disabled
+    use_mlflow = not args.no_mlflow
+    
+    # If MLflow is enabled, try to connect to the server
+    if use_mlflow:
+        try:
+            # Set tracking URI if provided
+            if args.mlflow_tracking_uri:
+                mlflow.set_tracking_uri(args.mlflow_tracking_uri)
+            
+            # Test connection by attempting to set experiment
+            mlflow.set_experiment("Fraud_Detection_Evaluation")
+            logger.info("Connected to MLflow tracking server successfully")
+        except Exception as e:
+            logger.warning(f"Failed to connect to MLflow server: {e}")
+            logger.warning("MLflow tracking will be disabled for this evaluation.")
+            logger.warning("You can run evaluation with --no-mlflow flag to avoid this warning.")
+            use_mlflow = False
     
     # Load model and test data
     model = load_model(args.model_path)
     X_test, y_test, feature_names = load_test_data(args.test_data, args.model_path)
     
     # Run evaluation based on model type
-    with mlflow.start_run(run_name=f"evaluate_{args.model_type}"):
+    # Create a proper context manager based on MLflow availability
+    if use_mlflow:
+        run_context = mlflow.start_run(run_name=f"evaluate_{args.model_type}")
+    else:
+        # Use a dummy context manager when MLflow is disabled
+        from contextlib import nullcontext
+        run_context = nullcontext()
+    
+    with run_context:
         if args.model_type == 'classification':
             threshold = 0.5 if args.threshold is None else args.threshold
             metrics = evaluate_classification_model(
@@ -1103,17 +1131,19 @@ def main():
                 output_dir=os.path.join(args.output_dir, 'figures')
             )
             
-            # Log metrics to MLflow
-            for metric, value in metrics.items():
-                mlflow.log_metric(metric, value)
+            # Log metrics to MLflow if enabled
+            if use_mlflow:
+                for metric, value in metrics.items():
+                    mlflow.log_metric(metric, value)
             
             # Save metrics to file
             save_metrics(metrics, args.model_type, os.path.join(args.output_dir, 'metrics'))
             
-            # Log cost-related parameters
-            mlflow.log_param('avg_transaction_amount', args.avg_transaction_amount)
-            mlflow.log_param('cost_fp_ratio', args.cost_fp_ratio)
-            mlflow.log_param('cost_fn_ratio', args.cost_fn_ratio)
+            # Log cost-related parameters if MLflow is enabled
+            if use_mlflow:
+                mlflow.log_param('avg_transaction_amount', args.avg_transaction_amount)
+                mlflow.log_param('cost_fp_ratio', args.cost_fp_ratio)
+                mlflow.log_param('cost_fn_ratio', args.cost_fn_ratio)
             
         elif args.model_type == 'autoencoder':
             try:
@@ -1133,10 +1163,11 @@ def main():
                     metrics = metrics_result
                     anomaly_scores = None
                 
-                # Log metrics to MLflow
-                for metric, value in metrics.items():
-                    if isinstance(value, (int, float)):
-                        mlflow.log_metric(metric, value)
+                # Log metrics to MLflow if enabled
+                if use_mlflow:
+                    for metric, value in metrics.items():
+                        if isinstance(value, (int, float)):
+                            mlflow.log_metric(metric, value)
                 
                 # Save metrics to file
                 save_metrics(metrics, args.model_type, os.path.join(args.output_dir, 'metrics'))
@@ -1146,18 +1177,24 @@ def main():
                 metrics = {'error': str(e)}
                 save_metrics(metrics, args.model_type, os.path.join(args.output_dir, 'metrics'))
         
-        # Log figures to MLflow if they exist
+        # Log figures to MLflow if they exist and MLflow is enabled
         figures_dir = os.path.join(args.output_dir, 'figures')
-        if os.path.exists(figures_dir):
-            try:
-                for figure_file in os.listdir(figures_dir):
-                    if figure_file.endswith('.png'):
-                        mlflow.log_artifact(os.path.join(figures_dir, figure_file), 'figures')
-            except Exception as e:
-                print(f"Warning: Could not log figures to MLflow: {str(e)}")
-        else:
-            print(f"Figures directory {figures_dir} does not exist. Skipping figure logging.")
-            # Create the directory for future use
+        
+        if use_mlflow:
+            if os.path.exists(figures_dir):
+                try:
+                    for figure_file in os.listdir(figures_dir):
+                        if figure_file.endswith('.png'):
+                            mlflow.log_artifact(os.path.join(figures_dir, figure_file), 'figures')
+                except Exception as e:
+                    print(f"Warning: Could not log figures to MLflow: {str(e)}")
+            else:
+                print(f"Figures directory {figures_dir} does not exist. Skipping MLflow figure logging.")
+                # Create the directory for future use
+                os.makedirs(figures_dir, exist_ok=True)
+        elif not os.path.exists(figures_dir):
+            # Create the figures directory if it doesn't exist
+            print(f"Creating figures directory {figures_dir}")
             os.makedirs(figures_dir, exist_ok=True)
 
 if __name__ == "__main__":

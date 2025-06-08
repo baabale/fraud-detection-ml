@@ -1,0 +1,1 @@
+{"experiment_name": "Fraud_Detection_Experiment", "run_name": "fraud_detection_20250525_211147", "hidden_layers": [128, 64, 32], "dropout_rate": 0.4, "batch_size": 256, "epochs": 5, "learning_rate": 0.001, "use_mlflow": false, "mlflow_tracking_uri": "http://localhost:5000"}

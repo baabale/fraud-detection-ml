@@ -61,7 +61,7 @@ except ImportError:
     logger.warning("TensorFlow not available. GPU acceleration not configured for data processing.")
 
 
-def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=None, multi_gpu=False, gpu_memory="8G"):
+def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=None, multi_gpu=False, gpu_memory="8G", spark_configs=None):
     """
     Create and return a Spark session optimized for Apple M2 chip.
     
@@ -87,13 +87,19 @@ def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=N
     # Start building the Spark session
     builder = SparkSession.builder.appName(app_name)
     
-    # Configure memory - optimized for M2 with 24GB RAM
-    builder = builder.config("spark.driver.memory", "16g") \
-                   .config("spark.executor.memory", "16g") \
+    # Configure memory - optimized for M2 with 24GB RAM - increased for large dataset
+    builder = builder.config("spark.driver.memory", "18g") \
+                   .config("spark.executor.memory", "18g") \
                    .config("spark.driver.cores", "8") \
                    .config("spark.executor.cores", "8") \
-                   .config("spark.default.parallelism", "16") \
-                   .config("spark.sql.shuffle.partitions", "16")
+                   .config("spark.default.parallelism", "32") \
+                   .config("spark.sql.shuffle.partitions", "32") \
+                   .config("spark.sql.files.maxPartitionBytes", "128m") \
+                   .config("spark.memory.fraction", "0.8") \
+                   .config("spark.memory.storageFraction", "0.3") \
+                   .config("spark.sql.adaptive.enabled", "true") \
+                   .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+                   .config("spark.sql.adaptive.skewJoin.enabled", "true")
     
     # Configure for Apple Silicon optimization
     builder = builder.config("spark.driver.extraJavaOptions", "-Duser.timezone=UTC -XX:+UseG1GC") \
@@ -112,18 +118,23 @@ def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=N
         # Enable Metal GPU acceleration for Apple Silicon
         try:
             import tensorflow as tf
-            # Check if Metal plugin is available
-            metal_available = any('Metal' in device.physical_device_desc for device in tf.config.list_physical_devices('GPU'))
+            # Check if Metal plugin is available for Apple Silicon
+            gpus = tf.config.list_physical_devices('GPU')
+            # For Apple Silicon, we'll assume Metal is available if any GPU is detected
+            # This avoids accessing physical_device_desc which isn't available on Metal devices
+            metal_available = any(device.name.endswith('GPU') for device in gpus)
             
             if metal_available:
                 logger.info("Apple Metal GPU detected. Configuring optimized settings.")
                 # Configure for Apple Metal GPU
                 builder = builder.config("spark.sql.execution.arrow.pyspark.enabled", "true") \
-                               .config("spark.sql.execution.arrow.maxRecordsPerBatch", "500000") \
+                               .config("spark.sql.execution.arrow.maxRecordsPerBatch", "250000") \
                                .config("spark.sql.adaptive.enabled", "true") \
                                .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-                               .config("spark.memory.fraction", "0.8") \
-                               .config("spark.memory.storageFraction", "0.3")
+                               .config("spark.sql.adaptive.skewJoin.enabled", "true") \
+                               .config("spark.memory.fraction", "0.9") \
+                               .config("spark.memory.storageFraction", "0.2") \
+                               .config("spark.driver.maxResultSize", "4g")
             else:
                 logger.info("Using standard GPU configuration")
                 # Standard GPU config
@@ -136,6 +147,11 @@ def create_spark_session(app_name="FraudDetectionPreprocessing", gpu_available=N
             logger.info("Falling back to CPU configuration with optimized settings")
     else:
         logger.info("Using CPU-only configuration for Spark with optimized settings for Apple M2")
+    
+    # Apply any custom configurations passed in
+    if spark_configs:
+        for key, value in spark_configs.items():
+            builder = builder.config(key, value)
     
     # Create and return the session
     return builder.getOrCreate()
@@ -196,8 +212,9 @@ def load_data(spark, file_path):
     
     # Read raw transaction data (assuming CSV with header and inferSchema)
     try:
+        start_time = time.time()
         df = spark.read.csv(file_path, header=True, inferSchema=True)
-        print(f"Loaded {df.count()} transactions from {file_path}")
+        print(f"Loaded {df.count()} transactions from {file_path} in {time.time() - start_time:.2f} seconds")
         return df
     except Exception as e:
         print(f"Error loading data: {str(e)}")
@@ -226,21 +243,25 @@ def load_data(spark, file_path):
 
 def preprocess_data(df):
     """
-    Preprocess transaction data by cleaning, transforming, and engineering features.
+    Preprocess the transaction data by performing feature engineering.
     
     Args:
-        df (DataFrame): Raw transaction DataFrame
+        df: Raw transaction dataframe
         
     Returns:
-        DataFrame: Processed DataFrame ready for modeling
+        Preprocessed dataframe with additional features
     """
-    # Get a logger
+    import logging
     logger = logging.getLogger('fraud_detection')
     
     logger.info("Starting data preprocessing...")
     
-    # List available columns for debugging
-    logger.info(f"Available columns: {df.columns}")
+    # Cache the raw dataframe to improve performance for repeated operations
+    df = df.cache()
+    
+    # Check available columns
+    available_columns = df.columns
+    logger.info(f"Available columns: {available_columns}")
     
     # Drop rows with null values in critical columns
     df = df.dropna(subset=["amount", "timestamp", "sender_account"])
@@ -249,11 +270,14 @@ def preprocess_data(df):
     if "timestamp" in df.columns:
         df = df.withColumn("timestamp", col("timestamp").cast(TimestampType()))
     
-    # Feature engineering
+    # Perform feature engineering
     logger.info("Performing feature engineering...")
     
-    # Amount-based features
+    # Add log transformation for amount (handle skewed distribution)
     df = df.withColumn("amount_log", log(col("amount") + 1))
+    
+    # Cache after initial transformations to improve performance
+    df = df.cache()
     
     # Time-based features
     if "timestamp" in df.columns:
@@ -359,6 +383,12 @@ def preprocess_data(df):
         df = df.withColumn("tx_velocity", col("tx_count_last5") / 5)
     
     logger.info(f"Preprocessing complete. Resulting dataframe has {df.count()} rows and {len(df.columns)} columns")
+    logger.info("Processed data schema:")
+    df.printSchema()
+    
+    # Cache the final processed dataframe for efficient reuse
+    df = df.cache()
+    
     return df
 
 def main():
@@ -369,6 +399,7 @@ def main():
     import argparse
     import logging
     import sys
+    import time
     
     # Configure logging for real-time output
     # Create logs directory if it doesn't exist
@@ -411,6 +442,14 @@ def main():
                         help='Enable memory growth for GPUs to prevent TensorFlow from allocating all memory')
     parser.add_argument('--gpu-memory', type=str, default='2G',
                         help='Amount of GPU memory to allocate for Spark operations (e.g. 2G, 4G)')
+    
+    # Performance tuning arguments
+    parser.add_argument('--num-partitions', type=int, default=32,
+                        help='Number of partitions for Spark processing (default: 32)')
+    parser.add_argument('--driver-memory', type=str, default='18g',
+                        help='Amount of memory to allocate for Spark driver (default: 18g)')
+    parser.add_argument('--executor-memory', type=str, default='18g',
+                        help='Amount of memory to allocate for Spark executors (default: 18g)')
     args = parser.parse_args()
     
     # Handle GPU configuration based on command-line arguments
@@ -442,9 +481,23 @@ def main():
     use_multi_gpu = not args.single_gpu
     
     # Initialize Spark with appropriate GPU configuration
+    # Override default Spark configs with command line arguments
+    os.environ['SPARK_DRIVER_MEMORY'] = args.driver_memory
+    os.environ['SPARK_EXECUTOR_MEMORY'] = args.executor_memory
+    
+    # Create custom Spark configs based on command line arguments
+    spark_configs = {
+        "spark.default.parallelism": str(args.num_partitions),
+        "spark.sql.shuffle.partitions": str(args.num_partitions),
+        "spark.driver.memory": args.driver_memory,
+        "spark.executor.memory": args.executor_memory
+    }
+    
+    # Initialize Spark with appropriate GPU configuration
     spark = create_spark_session(gpu_available=gpu_available, 
                                multi_gpu=use_multi_gpu,
-                               gpu_memory=args.gpu_memory)
+                               gpu_memory=args.gpu_memory,
+                               spark_configs=spark_configs)
     
     # Get absolute paths
     current_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -458,6 +511,7 @@ def main():
     logger.info(f"Using output path: {processed_path}")
     
     # Load and process data
+    start_time = time.time()
     df_raw = load_data(spark, raw_path)
     
     # Print schema and sample data
@@ -469,15 +523,18 @@ def main():
     # Preprocess data
     df_processed = preprocess_data(df_raw)
     
-    # Print processed schema
-    logger.info("Processed data schema:")
-    df_processed.printSchema()
-    
     # Save the processed data for modeling (as Parquet for efficiency)
     logger.info(f"Saving processed data to {processed_path}")
-    df_processed.write.mode("overwrite").parquet(processed_path)
+    df_processed.write.mode("overwrite").option("compression", "snappy").parquet(processed_path)
     
-    logger.info("Data processing complete!")
+    # Calculate and log the total processing time
+    end_time = time.time()
+    processing_time = end_time - start_time
+    logger.info(f"Data processing complete! Total processing time: {processing_time:.2f} seconds")
+    
+    # Unpersist cached DataFrames to free up memory
+    df_raw.unpersist()
+    df_processed.unpersist()
     
     # Stop Spark session
     spark.stop()

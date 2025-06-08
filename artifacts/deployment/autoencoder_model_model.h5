@@ -1,0 +1,3 @@
+# Placeholder model file
+# Original model: /Users/baabale/Documents/MasterStudies/thesis/results/models/autoencoder_model_model.h5
+# Error: Could not locate function 'mse'. Make sure custom classes are decorated with `@keras.saving.register_keras_serializable()`. Full object config: {'module': 'keras.metrics', 'class_name': 'function', 'config': 'mse', 'registered_name': 'mse'}

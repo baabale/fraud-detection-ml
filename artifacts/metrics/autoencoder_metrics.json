@@ -1,0 +1,36 @@
+{
+    "accuracy": 0.9705,
+    "precision": 0.7101449275362319,
+    "recall": 0.5568181818181818,
+    "f1_score": 0.6242038216560509,
+    "true_negatives": 1892,
+    "false_positives": 20,
+    "false_negatives": 39,
+    "true_positives": 49,
+    "threshold": 3877821.8489555116,
+    "threshold_percentile": 90.0,
+    "feature_importance": {
+        "max_amount_last5": 1929.144354362367,
+        "amount": 1877.257778867689,
+        "avg_amount_last5": 1837.1513944578069,
+        "day_cos": 455.87075035437886,
+        "geo_anomaly_score": 454.6077762085773,
+        "month_sin": 335.2120482012165,
+        "hour_sin": 300.89027874843686,
+        "hour_cos": 261.7239090935955,
+        "day_sin": 234.93453949476236,
+        "amount_log": 206.0511158937228
+    },
+    "permutation_importance": {
+        "avg_amount_last5": -233372.61203712225,
+        "amount": -124724.64946886199,
+        "max_amount_last5": -100383.39826661721,
+        "amount_log": 74.59330586716533,
+        "velocity_score": 6.162822703830898,
+        "hour_cos": -3.096798355691135,
+        "spending_deviation_score": 2.406985701993108,
+        "day_sin": -1.8955252524465322,
+        "month_sin": -1.4219156531617045,
+        "hour_sin": 0.6506028305739164
+    }
+}

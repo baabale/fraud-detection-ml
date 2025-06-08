@@ -1,0 +1,13 @@
+---
+# Pandoc template for JUST research format
+reference-doc: default
+geometry:
+  - margin=1in
+papersize: a4
+mainfont: "Times New Roman"
+fontsize: 12pt
+linestretch: 1.5
+header-includes:
+  - \usepackage{setspace}
+  - \doublespacing
+---

@@ -1,0 +1,1 @@
+["amount", "time_since_last_transaction", "spending_deviation_score", "velocity_score", "geo_anomaly_score", "transaction_frequency"]
