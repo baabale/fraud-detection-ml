@@ -49,6 +49,9 @@ def run_command(command, description):
     """
     logger.info(f"Starting: {description}")
     logger.info(f"Command: {command}")
+
+    # Disable the logging
+    logger.disabled = True
     
     # Set environment variable to disable output buffering in Python subprocesses
     env = os.environ.copy()

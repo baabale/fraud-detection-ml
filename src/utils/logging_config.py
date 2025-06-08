@@ -7,7 +7,26 @@ import os
 import logging
 import logging.config
 import yaml
+import re
 from pathlib import Path
+
+class ProgressBarFilter(logging.Filter):
+    """Filter to prevent duplicate progress bar logs"""
+    def __init__(self):
+        super().__init__()
+        self.last_message = None
+        # Pattern to match TensorFlow progress bars
+        self.progress_pattern = re.compile(r'\d+/\d+ \[.+\] - ETA: .+s')
+    
+    def filter(self, record):
+        # If this is a progress bar message
+        if self.progress_pattern.search(record.getMessage()):
+            # If it's the same as the last message, filter it out
+            if record.getMessage() == self.last_message:
+                return False
+            self.last_message = record.getMessage()
+        return True
+
 
 def setup_logging(config_path=None, default_level=logging.INFO):
     """
@@ -50,6 +69,11 @@ def setup_logging(config_path=None, default_level=logging.INFO):
         # Configure TensorFlow logger to be completely silent
         tf_logger = logging.getLogger('tensorflow')
         tf_logger.setLevel(logging.ERROR)  # Only show errors, not warnings
+        
+        # Add progress bar filter to root logger to prevent duplicate progress bars
+        root_logger = logging.getLogger()
+        progress_filter = ProgressBarFilter()
+        root_logger.addFilter(progress_filter)
         tf_logger.propagate = False  # Don't propagate to parent loggers
 
         # Configure absl logger (used by TensorFlow) to be completely silent
