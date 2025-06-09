@@ -503,55 +503,175 @@ def run_tests(test_type='all'):
     Args:
         test_type (str): Type of tests to run (unit/integration/api/model/all)
     """
-    # Check for required test dependencies
-    missing_test_deps = []
-    if test_type == 'integration' or test_type == 'all':
+    logger.info(f"Running {test_type} tests")
+
+
+def train_ensemble(config, disable_gpu=False, single_gpu=False, memory_growth=False):
+    """
+    Train the ensemble model using pre-trained classification and autoencoder models.
+    
+    Args:
+        config (dict): Configuration parameters
+        disable_gpu (bool): Whether to disable GPU usage
+        single_gpu (bool): Whether to use only a single GPU
+        memory_growth (bool): Enable memory growth for GPUs
+    """
+    logger.info("Training ensemble model")
+    
+    # Set environment variables for GPU configuration
+    env_vars = []
+    if disable_gpu:
+        env_vars.append("CUDA_VISIBLE_DEVICES=-1")
+    elif single_gpu:
+        env_vars.append("CUDA_VISIBLE_DEVICES=0")
+    
+    if memory_growth:
+        os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+    
+    # Find available data files
+    available_data_files = []
+    for root, dirs, files in os.walk('data'):
+        for file in files:
+            if file.endswith('.parquet'):
+                available_data_files.append(os.path.join(root, file))
+        for dir in dirs:
+            if dir.endswith('.parquet'):  # Handle Spark partitioned parquet directories
+                available_data_files.append(os.path.join(root, dir))
+    
+    # Suggest data files
+    if available_data_files:
+        print("\nAvailable data files:")
+        for i, file_path in enumerate(available_data_files):
+            print(f"  {i+1}. {file_path}")
+        
+        # Allow selection by number or path
+        data_selection = input("\nSelect data file (number or path): ")
+        
+        # Check if input is a number
         try:
-            __import__('prometheus_flask_exporter')
-        except ImportError:
-            missing_test_deps.append('prometheus_flask_exporter')
+            selection_idx = int(data_selection) - 1
+            if 0 <= selection_idx < len(available_data_files):
+                data_path = available_data_files[selection_idx]
+            else:
+                print(f"Invalid selection. Using default path.")
+                data_path = "data/processed/test_data.parquet" if os.path.exists("data/processed/test_data.parquet") else available_data_files[0]
+        except ValueError:
+            # Input is a path
+            data_path = data_selection if os.path.exists(data_selection) else available_data_files[0]
+    else:
+        print("No parquet files found in the data directory.")
+        data_path = input("Path to processed data: ")
     
-    # Install missing dependencies if needed
-    if missing_test_deps:
-        print("\nMissing test dependencies detected:")
-        for dep in missing_test_deps:
-            print(f"  - {dep}")
+    # Verify data path exists
+    if not os.path.exists(data_path):
+        print(f"Warning: Data file {data_path} does not exist. Please check the path.")
+        return False
+    
+    print(f"Using data file: {data_path}")
+    
+    # Find available model files
+    available_models = []
+    for root, dirs, files in os.walk('artifacts/models'):
+        for file in files:
+            if file.endswith('.keras'):
+                available_models.append(os.path.join(root, file))
+    
+    # Separate classification and autoencoder models based on filename patterns
+    classification_models = [model for model in available_models if 'class' in model.lower()]
+    autoencoder_models = [model for model in available_models if 'auto' in model.lower() or 'ae' in model.lower()]
+    
+    # If specific patterns didn't work, use all models
+    if not classification_models:
+        classification_models = available_models
+    if not autoencoder_models:
+        autoencoder_models = available_models
+    
+    # Get classification model path
+    if classification_models:
+        print("\nAvailable classification models:")
+        for i, model_path in enumerate(classification_models):
+            print(f"  {i+1}. {model_path}")
         
-        install = input("\nWould you like to install missing dependencies? (y/n): ").lower()
-        if install == 'y':
-            for dep in missing_test_deps:
-                print(f"\nInstalling {dep}...")
-                run_command(f"pip install {dep}")
-            print("\nDependencies installed successfully.")
-        else:
-            print("\nSkipping dependency installation. Some tests may fail.")
-    
-    # Run the tests
-    if test_type == 'unit' or test_type == 'all':
-        print("\n--- Running unit tests ---")
-        command = "python -m unittest discover -s tests/unit"
-        run_command(command)
-    
-    if test_type == 'integration' or test_type == 'all':
-        print("\n--- Running integration tests ---")
-        # Check if API server is running
-        print("Note: Integration tests require the API server to be running.")
-        command = "python -m unittest discover -s tests/integration"
-        run_command(command)
-    
-    if test_type == 'api' or test_type == 'all':
-        print("\n--- Running API tests ---")
-        # Check if API server is running
-        print("Note: API tests require the API server to be running on port 8080.")
-        command = "python test_api.py"
-        run_command(command)
-    
-    if test_type == 'model' or test_type == 'all':
-        print("\n--- Running model debug tests ---")
-        command = "python debug_model.py"
-        run_command(command)
+        clf_selection = input("\nSelect classification model (number or path): ")
         
-    return True
+        try:
+            selection_idx = int(clf_selection) - 1
+            if 0 <= selection_idx < len(classification_models):
+                classification_model = classification_models[selection_idx]
+            else:
+                print(f"Invalid selection. Using default path.")
+                classification_model = "artifacts/models/classification_model_model.keras"
+        except ValueError:
+            # Input is a path
+            classification_model = clf_selection if os.path.exists(clf_selection) else "artifacts/models/classification_model_model.keras"
+    else:
+        classification_model = input("Path to classification model: ")
+    
+    # Get autoencoder model path
+    if autoencoder_models:
+        print("\nAvailable autoencoder models:")
+        for i, model_path in enumerate(autoencoder_models):
+            print(f"  {i+1}. {model_path}")
+        
+        ae_selection = input("\nSelect autoencoder model (number or path): ")
+        
+        try:
+            selection_idx = int(ae_selection) - 1
+            if 0 <= selection_idx < len(autoencoder_models):
+                autoencoder_model = autoencoder_models[selection_idx]
+            else:
+                print(f"Invalid selection. Using default path.")
+                autoencoder_model = "artifacts/models/autoencoder_model_model.keras"
+        except ValueError:
+            # Input is a path
+            autoencoder_model = ae_selection if os.path.exists(ae_selection) else "artifacts/models/autoencoder_model_model.keras"
+    else:
+        autoencoder_model = input("Path to autoencoder model: ")
+    
+    # Get output directory
+    output_dir = input("Output directory for ensemble model [artifacts/models/ensemble]: ") or "artifacts/models/ensemble"
+    
+    # Verify model paths exist
+    if not os.path.exists(classification_model):
+        print(f"Error: Classification model {classification_model} does not exist. Please check the path.")
+        return False
+    
+    if not os.path.exists(autoencoder_model):
+        print(f"Error: Autoencoder model {autoencoder_model} does not exist. Please check the path.")
+        return False
+        
+    print(f"\nUsing models:\n- Classification: {classification_model}\n- Autoencoder: {autoencoder_model}")
+
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get ensemble parameters
+    classification_weight = input("Classification model weight (0.0-1.0) [0.7]: ") or "0.7"
+    val_split = input("Validation split (0.0-1.0) [0.2]: ") or "0.2"
+    save_processor = input("Save data processor separately? (y/[n]): ").lower() == 'y'
+    
+    # Build command
+    save_processor_flag = "--save-processor" if save_processor else ""
+    
+    cmd_parts = []
+    if env_vars:
+        cmd_parts.extend(env_vars)
+    
+    cmd_parts.extend([
+        "python src/models/ensemble/train_ensemble.py",
+        f"--data-path {data_path}",
+        f"--classification-model {classification_model}",
+        f"--autoencoder-model {autoencoder_model}",
+        f"--output-dir {output_dir}",
+        f"--classification-weight {classification_weight}",
+        f"--val-split {val_split}",
+        save_processor_flag
+    ])
+    
+    # Run the command
+    command = " ".join(cmd_parts)
+    return run_command(command)
 
 def main():
     """
@@ -610,9 +730,10 @@ def main():
         print("8. Monitor model performance")
         print("9. Launch Jupyter notebooks")
         print("10. Run tests")
+        print("11. Train ensemble model")
         print("0. Exit")
         
-        choice = input("\nEnter your choice (0-10): ")
+        choice = input("\nEnter your choice (0-11): ")
         
         if choice == '0':
             print("\nExiting the system. Goodbye!")
@@ -777,6 +898,25 @@ def main():
                     time.sleep(5)  # Give the server some time to start
             
             run_tests(test_type)
+        
+        elif choice == '11':
+            print("\n--- Training ensemble model ---")
+            
+            # GPU configuration options
+            if gpu_available:
+                print(f"\nGPU Configuration:")
+                disable_gpu = input(f"Disable GPU acceleration? (y/[n]): ").lower() == 'y'
+                single_gpu = False if disable_gpu else (input(f"Use only a single GPU? ({num_gpus} available) (y/[n]): ").lower() == 'y' if num_gpus > 1 else False)
+                memory_growth = False if disable_gpu else (input(f"Enable memory growth for GPUs? ([y]/n): ").lower() != 'n')
+                
+                if not disable_gpu:
+                    print(f"\n🚀 Training ensemble with {'single GPU' if single_gpu else 'all GPUs'} acceleration")
+            else:
+                disable_gpu = True
+                single_gpu = False
+                memory_growth = False
+            
+            train_ensemble(config, disable_gpu, single_gpu, memory_growth)
         
         else:
             print("\nInvalid choice. Please try again.")
